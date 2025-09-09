@@ -2,10 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import pkg from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { config } from 'dotenv';
-
-// Load environment variables from .env.local
-config({ path: '.env.local' });
+import { TELEGRAM_API_ID, TELEGRAM_API_HASH } from '$env/static/private';
 
 const { TelegramClient } = pkg;
 
@@ -22,13 +19,14 @@ export const GET: RequestHandler = async ({ cookies }) => {
 
 		// Create client with stored session
 		const session = new StringSession(sessionString);
-		const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
-		const apiHash = process.env.TELEGRAM_API_HASH || '';
+		const apiId = parseInt(TELEGRAM_API_ID || '0');
+		const apiHash = TELEGRAM_API_HASH || '';
 		
 		if (!apiId || !apiHash) {
+			console.error('Missing Telegram API credentials:', { apiId: !!apiId, apiHash: !!apiHash });
 			return json({
 				success: false,
-				error: 'Server configuration error'
+				error: 'Server configuration error: Missing Telegram API credentials'
 			}, { status: 500 });
 		}
 
