@@ -98,6 +98,8 @@ export class DataPipeline {
 			token_symbol: parseResult.tokenSymbol || null,
 			is_valid: validation.isValid,
 			call_type: parseResult.callType || null,
+			// Set message_timestamp from metadata if available (from Telegram message date)
+			message_timestamp: metadata?.timestamp ? new Date(metadata.timestamp) : null,
 			// New dedicated columns
 			token_name: parseResult.metadata?.tokenName || null,
 			contract_address: parseResult.metadata?.solanaAddress || null,

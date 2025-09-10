@@ -63,6 +63,7 @@ export const GET: RequestHandler = async ({ url }) => {
 				call_type,
 				sqdgn_label,
 				created_at,
+				message_timestamp,
 				market_cap,
 				current_market_cap,
 				market_cap_updated_at,
@@ -75,10 +76,10 @@ export const GET: RequestHandler = async ({ url }) => {
 		// Apply time filter if specified
 		if (hoursFilter) {
 			const hoursAgo = new Date(Date.now() - parseInt(hoursFilter) * 60 * 60 * 1000);
-			query = query.gte('created_at', hoursAgo.toISOString());
+			query = query.gte('message_timestamp', hoursAgo.toISOString());
 		}
 
-		const { data: calls, error } = await query.order('created_at', { ascending: false });
+		const { data: calls, error } = await query.order('message_timestamp', { ascending: false });
 
 		if (error) {
 			console.error('Database error:', error);
@@ -151,7 +152,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			initialMarketCap: call.initialMarketCap,
 			currentMarketCap: call.currentMarketCap,
 			marketCapChange: call.marketCapChange,
-			createdAt: call.created_at
+			createdAt: call.message_timestamp || call.created_at
 		}));
 		
 		const topLosers = sortedByROI.slice(-5).reverse().map(call => ({
@@ -162,7 +163,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			initialMarketCap: call.initialMarketCap,
 			currentMarketCap: call.currentMarketCap,
 			marketCapChange: call.marketCapChange,
-			createdAt: call.created_at
+			createdAt: call.message_timestamp || call.created_at
 		}));
 
 		// Calculate call type performance
@@ -217,7 +218,7 @@ export const GET: RequestHandler = async ({ url }) => {
 		const today = new Date();
 		today.setHours(0, 0, 0, 0);
 		const todaysCalls = callsWithMarketCapData.filter(call => 
-			new Date(call.created_at) >= today
+			new Date(call.message_timestamp || call.created_at) >= today
 		);
 
 		const todayROI = todaysCalls.length > 0 

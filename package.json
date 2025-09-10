@@ -7,6 +7,7 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
+		"start": "node build",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
@@ -14,8 +15,10 @@
 	"dependencies": {
 		"@supabase/ssr": "^0.1.0",
 		"@supabase/supabase-js": "^2.39.0",
+		"@sveltejs/adapter-node": "^5.3.1",
 		"date-fns": "^3.3.1",
-		"telegram": "^2.26.22"
+		"mtcute": "^0.17.0",
+		"telegram": "^2.25.15"
 	},
 	"devDependencies": {
 		"@inquirer/prompts": "^7.8.4",

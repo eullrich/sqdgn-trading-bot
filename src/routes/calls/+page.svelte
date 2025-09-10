@@ -409,8 +409,8 @@
 									{call.sqdgn_label || '-'}
 								</td>
 								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									<div class="font-medium">{getTimeAgo(call.created_at)}</div>
-									<div class="text-xs text-gray-500">{formatDateTime(call.created_at)}</div>
+									<div class="font-medium">{getTimeAgo(call.message_timestamp || call.created_at)}</div>
+									<div class="text-xs text-gray-500">{formatDateTime(call.message_timestamp || call.created_at)}</div>
 								</td>
 								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500">
 									{call.creation_date ? formatDate(call.creation_date) : '-'}

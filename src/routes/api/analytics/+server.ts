@@ -20,6 +20,7 @@ export const GET: RequestHandler = async ({ url }) => {
 				call_type,
 				sqdgn_label,
 				created_at,
+				message_timestamp,
 				market_cap,
 				current_market_cap,
 				market_cap_updated_at,
@@ -31,11 +32,11 @@ export const GET: RequestHandler = async ({ url }) => {
 
 		// Apply filters
 		if (startDate) {
-			query = query.gte('created_at', startDate);
+			query = query.gte('message_timestamp', startDate);
 		}
 
 		if (endDate) {
-			query = query.lte('created_at', endDate);
+			query = query.lte('message_timestamp', endDate);
 		}
 
 		if (tokenSymbol) {
@@ -52,10 +53,10 @@ export const GET: RequestHandler = async ({ url }) => {
 
 		if (hours) {
 			const hoursAgo = new Date(Date.now() - parseInt(hours) * 60 * 60 * 1000);
-			query = query.gte('created_at', hoursAgo.toISOString());
+			query = query.gte('message_timestamp', hoursAgo.toISOString());
 		}
 
-		const { data: calls, error } = await query.order('created_at', { ascending: false });
+		const { data: calls, error } = await query.order('message_timestamp', { ascending: false });
 
 		if (error) {
 			console.error('Database error:', error);
@@ -215,7 +216,8 @@ export const GET: RequestHandler = async ({ url }) => {
 		// Performance trends (daily)
 		const dailyTrends = new Map();
 		callsWithData.forEach(call => {
-			const date = call.created_at.split('T')[0];
+			const callTime = call.message_timestamp || call.created_at;
+			const date = callTime.split('T')[0];
 			
 			if (!dailyTrends.has(date)) {
 				dailyTrends.set(date, {
@@ -247,7 +249,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			token_symbol: call.token_symbol,
 			call_type: call.call_type,
 			sqdgn_label: call.sqdgn_label,
-			created_at: call.created_at,
+			created_at: call.message_timestamp || call.created_at,
 			marketCapROI: call.marketCapROI,
 			initialMarketCap: call.initialMarketCap,
 			currentMarketCap: call.currentMarketCap

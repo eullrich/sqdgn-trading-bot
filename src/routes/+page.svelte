@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import type { DashboardMetrics } from '$lib/types';
 	import { formatCurrency, formatPercentage, formatMultiplier } from '$lib/utils';
+	import Terminal from '$lib/components/Terminal.svelte';
 
 	let analytics: any = null;
 	let roiData: any = null;
@@ -14,7 +15,7 @@
 	let monitoringLoading = false;
 
 	// Advanced filtering state
-	let selectedPeriod = '30d';
+	let selectedPeriod = '1d';
 	let selectedToken = '';
 	let selectedCallType = '';
 	let selectedLabel = '';
@@ -33,6 +34,8 @@
 	})) || [];
 
 	const periods = [
+		{ value: '1d', label: 'Last 24 hours' },
+		{ value: '2d', label: 'Last 2 days' },
 		{ value: '7d', label: 'Last 7 days' },
 		{ value: '30d', label: 'Last 30 days' },
 		{ value: '90d', label: 'Last 90 days' },
@@ -257,7 +260,7 @@
 	}
 
 	function resetFilters() {
-		selectedPeriod = '30d';
+		selectedPeriod = '1d';
 		selectedToken = '';
 		selectedCallType = '';
 		selectedLabel = '';
@@ -1081,6 +1084,15 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- Terminal Output Section -->
+		<div class="space-y-6">
+			<Terminal 
+				title="🖥️ System Logs" 
+				height="400px" 
+				maxLines={200}
+			/>
+		</div>
 
 	{/if}
 </div>

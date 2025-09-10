@@ -1,8 +1,9 @@
 import pkg from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { NewMessage } from 'telegram/events';
+import events from 'telegram/events';
 
 const { TelegramClient: TelegramApiClient } = pkg;
+const { NewMessage } = events;
 import { processMessage } from './data-pipeline';
 // import type { Message } from 'telegram/tl/custom/message';
 
@@ -11,6 +12,22 @@ class TelegramClient {
     private session: StringSession;
     private isConnected = false;
     private monitoringChannels: string[] = [];
+    private reconnectAttempts = 0;
+    private maxReconnectAttempts = 5;
+    private reconnectDelay = 10000; // 10 seconds (slower to prevent rapid cycling)
+    private heartbeatInterval: NodeJS.Timeout | null = null;
+    private circuitBreakerFailures = 0;
+    private circuitBreakerThreshold = 3;
+    private circuitBreakerResetTime = 120000; // 2 minutes for timeout patterns
+    private isCircuitBreakerOpen = false;
+    private lastTimeoutTime = 0;
+    private rapidTimeoutCount = 0;
+    private connectionRefreshInterval: NodeJS.Timeout | null = null;
+    private lastSuccessfulOperation = Date.now();
+    private pollingFallbackActive = false;
+    private pollingInterval: NodeJS.Timeout | null = null;
+    private streamingHealthy = true;
+    private consecutiveStreamFailures = 0;
 
     constructor() {
         // Initialize with empty session - will be set when connecting
@@ -30,6 +47,16 @@ class TelegramClient {
 
         this.client = new TelegramApiClient(this.session, apiId, apiHash, {
             connectionRetries: 5,
+            retryDelay: 2000,
+            timeout: 90,           // Increased timeout for 2.25.x stability
+            requestRetries: 3,
+            floodSleepThreshold: 300,
+            useIPV6: false,
+            autoReconnect: false,  // Keep our own reconnect logic
+            // Switch to WebSocket for better idle tolerance 
+            useWSS: true,          // Use WebSocket - better for persistent idle connections
+            // Connection optimization
+            maxConcurrentDownloads: 1,
         });
 
         console.log('Connecting to Telegram...');
@@ -67,6 +94,16 @@ class TelegramClient {
         this.session = new StringSession(sessionString);
         this.client = new TelegramApiClient(this.session, apiId, apiHash, {
             connectionRetries: 5,
+            retryDelay: 2000,
+            timeout: 90,           // Increased timeout for 2.25.x stability
+            requestRetries: 3,
+            floodSleepThreshold: 300,
+            useIPV6: false,
+            autoReconnect: false,  // Keep our own reconnect logic
+            // Switch to WebSocket for better idle tolerance 
+            useWSS: true,          // Use WebSocket - better for persistent idle connections
+            // Connection optimization
+            maxConcurrentDownloads: 1,
         });
 
         console.log('Connecting to Telegram with stored session...');
@@ -74,6 +111,16 @@ class TelegramClient {
 
         console.log('Successfully connected to Telegram with session');
         this.isConnected = true;
+        this.reconnectAttempts = 0;
+        
+        // Set up error handlers
+        this.setupErrorHandlers();
+        
+        // Start passive connection monitoring with destroy() fix
+        this.startPassiveMonitoring();
+        
+        // Start periodic connection refresh
+        this.startConnectionRefresh();
     }
 
     async startListening(): Promise<void> {
@@ -100,11 +147,11 @@ class TelegramClient {
                 console.log(`New message received: ${message.text?.substring(0, 100)}...`);
                 
                 try {
-                    // Send to Supabase Edge Function for processing
-                    await this.sendToWebhook({
+                    // Process locally via data pipeline
+                    await processMessage({
                         message_id: message.id.toString(),
                         raw_message: message.text || '',
-                        timestamp: new Date(message.date * 1000).toISOString(),
+                        timestamp: new Date(message.date * 1000),
                     });
                 } catch (error) {
                     console.error('Error processing message:', error);
@@ -120,13 +167,14 @@ class TelegramClient {
             throw new Error('Client not connected. Call connectWithSession() first.');
         }
 
-        this.monitoringChannels = channelData.map(c => c.id);
-        console.log(`Starting to listen for messages in ${channelData.length} channels...`);
+        try {
+            this.monitoringChannels = channelData.map(c => c.id);
+            console.log(`Starting to listen for messages in ${channelData.length} channels...`);
 
-        // Get channel entities using stored ID and accessHash
-        const channels: any[] = [];
-        for (const channelInfo of channelData) {
-            try {
+            // Get channel entities using stored ID and accessHash
+            const channels: any[] = [];
+            for (const channelInfo of channelData) {
+                try {
                 console.log(`🔍 Attempting to connect to channel: ${channelInfo.title} (ID: ${channelInfo.id}, AccessHash: ${channelInfo.accessHash})`);
                 
                 let channel;
@@ -168,7 +216,7 @@ class TelegramClient {
             throw new Error('No channels could be connected to');
         }
 
-        // Add event handler for new messages from all selected channels
+        // Add event handler with proper destroy() error handling
         this.client.addEventHandler(async (event: any) => {
             try {
                 const message = event.message;
@@ -181,38 +229,69 @@ class TelegramClient {
                 
                 // Check if message is from one of our monitored channels
                 const messageChannelId = message.chatId?.toString();
-                console.log(`🔍 Checking if message from ${messageChannelId} matches monitored channels:`, channels.map(c => c.id.toString()));
                 
-                const isFromMonitoredChannel = channels.some(channel => 
-                    channel.id.toString() === messageChannelId
-                );
+                // Convert between Telegram ID formats:
+                // Channel ID: 2300324200 -> Chat ID: -1002300324200 (add -100 prefix)
+                // Chat ID: -1002300324200 -> Channel ID: 2300324200 (remove -100 prefix)
+                const convertChatIdToChannelId = (chatId: string) => {
+                    if (chatId.startsWith('-100')) {
+                        return chatId.replace('-100', '');
+                    }
+                    return chatId;
+                };
+                
+                const convertChannelIdToChatId = (channelId: string) => {
+                    if (!channelId.startsWith('-100')) {
+                        return `-100${channelId}`;
+                    }
+                    return channelId;
+                };
+                
+                const messageChanId = convertChatIdToChannelId(messageChannelId || '');
+                console.log(`🔍 Message from Chat ID: ${messageChannelId} -> Channel ID: ${messageChanId}`);
+                console.log(`📋 Monitoring Channel IDs: ${this.monitoringChannels.join(', ')}`);
+                
+                // Check if this message is from one of our monitored channels
+                const isFromMonitoredChannel = this.monitoringChannels.includes(messageChanId);
+                console.log(`✅ Is from monitored channel: ${isFromMonitoredChannel}`);
                 
                 if (isFromMonitoredChannel) {
                     const channelName = channels.find(c => c.id.toString() === messageChannelId)?.title || messageChannelId;
                     console.log(`📨 Processing new message from ${channelName}: ${message.text.substring(0, 100)}...`);
                     
                     try {
-                        // Send to Supabase Edge Function for processing
-                        await this.sendToWebhook({
+                        // Process message directly with local data pipeline
+                        console.log(`⚡ Processing message ${message.id} locally...`);
+                        await processMessage({
                             message_id: `${messageChannelId}_${message.id}`,
                             raw_message: message.text,
-                            timestamp: new Date(message.date * 1000).toISOString(),
-                            channel_id: messageChannelId,
-                            channel_title: channelName
+                            timestamp: new Date(message.date * 1000),
                         });
                         console.log(`✅ Successfully processed message ${message.id} from ${channelName}`);
+                        this.lastSuccessfulOperation = Date.now();
                     } catch (error) {
                         console.error(`❌ Error processing message ${message.id}:`, error);
                     }
-                } else {
-                    console.log(`🚫 Ignoring message from unmonitored channel: ${messageChannelId}`);
                 }
             } catch (error) {
                 console.error('💥 Critical error in event handler:', error);
+                
+                // If it's a connection-related error, trigger reconnection with destroy()
+                if (this.shouldReconnect(error)) {
+                    console.log('🔄 Triggering reconnection with destroy() fix...');
+                    this.handleReconnectAsync();
+                }
             }
         }, new NewMessage({}));
 
-        console.log(`🎧 Event handler added. Listening for messages from ${channels.length} channels...`);
+        console.log(`🎧 Event handler added with destroy() fix. Listening for messages from ${channels.length} channels...`);
+        
+        // TEST: Disabled for stability testing - monitoring aggressive keep-alives instead
+        console.log('🔬 Stability mode active - aggressive 15s keep-alives enabled');
+        } catch (error) {
+            console.error('🚨 Failed to start listening to channels:', error);
+            throw error;
+        }
     }
 
     async getRecentMessages(limit: number = 100): Promise<void> {
@@ -236,10 +315,11 @@ class TelegramClient {
         for (const message of messages.reverse()) {
             if (message.text) {
                 try {
-                    await this.sendToWebhook({
+                    // Process message directly with local data pipeline
+                    await processMessage({
                         message_id: message.id.toString(),
                         raw_message: message.text,
-                        timestamp: new Date(message.date * 1000).toISOString(),
+                        timestamp: new Date(message.date * 1000),
                     });
                 } catch (error) {
                     console.error(`Error processing message ${message.id}:`, error);
@@ -293,12 +373,11 @@ class TelegramClient {
                 for (const message of messages.reverse()) {
                     if (message.text) {
                         try {
-                            await this.sendToWebhook({
+                            // Process message directly with local data pipeline
+                            await processMessage({
                                 message_id: `${channelInfo.id}_${message.id}`,
                                 raw_message: message.text,
-                                timestamp: new Date(message.date * 1000).toISOString(),
-                                channel_id: channelInfo.id,
-                                channel_title: channelInfo.title
+                                timestamp: new Date(message.date * 1000),
                             });
                             totalMessages++;
                         } catch (error) {
@@ -314,11 +393,448 @@ class TelegramClient {
         console.log(`✅ Finished processing ${totalMessages} total historical messages from ${channelData.length} channels`);
     }
 
-    async disconnect(): Promise<void> {
-        if (this.client && this.isConnected) {
-            await this.client.disconnect();
+    private setupErrorHandlers(): void {
+        if (!this.client) return;
+
+        // The Telegram client doesn't use standard EventEmitter patterns
+        // We'll rely on heartbeat monitoring and error handling in individual methods
+        console.log('✅ Connection monitoring set up - relying on heartbeat and method-level error handling');
+    }
+
+    private shouldReconnect(error: any): boolean {
+        // Check circuit breaker
+        if (this.isCircuitBreakerOpen) {
+            console.warn('🚦 Circuit breaker is open - skipping reconnection attempt');
+            return false;
+        }
+
+        const reconnectErrors = [
+            'TIMEOUT',
+            'CONNECTION_DEVICE_ERROR',
+            'NETWORK_ERROR',
+            'CONNECTION_NOT_INITED',
+            'AUTH_KEY_DUPLICATED',
+            'CONNECTION_DEVICE_INVALID',
+            'SESSION_REVOKED'
+        ];
+        
+        const shouldReconnect = reconnectErrors.some(errorType => 
+            error.message?.includes(errorType) || error.toString().includes(errorType)
+        );
+
+        if (shouldReconnect) {
+            const now = Date.now();
+            
+            // Detect rapid timeout pattern (timeouts within 2 minutes)
+            if (error.message?.includes('TIMEOUT')) {
+                if (now - this.lastTimeoutTime < 120000) { // Within 2 minutes
+                    this.rapidTimeoutCount++;
+                } else {
+                    this.rapidTimeoutCount = 1; // Reset if gap is large
+                }
+                this.lastTimeoutTime = now;
+                
+                // Special handling for rapid timeout cycles
+                if (this.rapidTimeoutCount >= 3) {
+                    console.warn(`🚦 Rapid timeout pattern detected (${this.rapidTimeoutCount} timeouts) - opening circuit breaker for longer`);
+                    this.isCircuitBreakerOpen = true;
+                    this.rapidTimeoutCount = 0;
+                    
+                    // Longer timeout for rapid timeout patterns
+                    setTimeout(() => {
+                        console.log('🚦 Circuit breaker reset after timeout pattern cooldown');
+                        this.isCircuitBreakerOpen = false;
+                        this.circuitBreakerFailures = 0;
+                    }, 300000); // 5 minutes for timeout patterns
+                    
+                    return false;
+                }
+            }
+            
+            this.circuitBreakerFailures++;
+            
+            // Standard circuit breaker logic
+            if (this.circuitBreakerFailures >= this.circuitBreakerThreshold) {
+                console.warn(`🚦 Circuit breaker opened after ${this.circuitBreakerFailures} failures`);
+                this.isCircuitBreakerOpen = true;
+                
+                // Reset circuit breaker after timeout
+                setTimeout(() => {
+                    console.log('🚦 Circuit breaker reset - allowing reconnection attempts');
+                    this.isCircuitBreakerOpen = false;
+                    this.circuitBreakerFailures = 0;
+                }, this.circuitBreakerResetTime);
+                
+                return false; // Don't reconnect immediately
+            }
+        }
+        
+        return shouldReconnect;
+    }
+
+    private async handleReconnect(): Promise<void> {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.error(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping monitoring.`);
             this.isConnected = false;
-            console.log('Disconnected from Telegram');
+            return;
+        }
+
+        this.reconnectAttempts++;
+        console.log(`🔄 Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
+
+        try {
+            // DESTROY existing client to properly stop update loop (GramJS fix)
+            if (this.client && this.isConnected) {
+                try {
+                    console.log('🔥 Destroying client to stop update loop before reconnection');
+                    await this.client.destroy();
+                } catch (destroyError) {
+                    console.warn('⚠️ Error during destroy:', destroyError);
+                }
+                this.client = null; // Clear reference for full cleanup
+            }
+
+            // Wait before reconnecting
+            await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+
+            // Get session before destroying client
+            const sessionString = this.session?.save() || '';
+            if (!sessionString) {
+                throw new Error('No session string available for reconnection');
+            }
+
+            // Recreate client completely (fresh instance)
+            this.isConnected = false;
+            this.client = null; // Ensure clean slate
+            await this.connectWithSession(sessionString);
+            console.log('✅ Successfully reconnected with fresh client instance');
+            
+
+        } catch (error) {
+            console.error(`❌ Reconnection attempt ${this.reconnectAttempts} failed:`, error);
+            
+            // Exponential backoff
+            this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Max 30 seconds
+            
+            // Try again after delay
+            setTimeout(() => this.handleReconnect(), this.reconnectDelay);
+        }
+    }
+
+    private startPassiveMonitoring(): void {
+        // Clear existing heartbeat if any
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+        }
+
+        // AGGRESSIVE keep-alive every 15 seconds to prevent idle disconnects
+        this.heartbeatInterval = setInterval(async () => {
+            try {
+                if (this.client && this.isConnected) {
+                    // IGNORE client.disconnected flag - it's unreliable in GramJS
+                    // Use keep-alive success/failure as the true health indicator
+                    
+                    // Send aggressive keep-alive every cycle (15s) to prevent idle timeouts
+                    console.log('💓 Sending aggressive keep-alive to maintain connection health');
+                    
+                    try {
+                        // Use lightweight getState call with short timeout
+                        const startTime = Date.now();
+                        await Promise.race([
+                            this.client.invoke(new (await import('telegram')).Api.updates.GetState()),
+                            new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('Keep-alive timeout')), 8000)
+                            )
+                        ]);
+                        
+                        const duration = Date.now() - startTime;
+                        console.log(`✅ Keep-alive successful (${duration}ms) - connection healthy`);
+                        this.lastSuccessfulOperation = Date.now();
+                        
+                        // Reset all failure counters on success
+                        this.circuitBreakerFailures = 0;
+                        this.isCircuitBreakerOpen = false;
+                        this.consecutiveStreamFailures = 0;
+                        
+                    } catch (keepAliveError) {
+                        console.error('💔 Keep-alive failed - connection may be stale:', keepAliveError);
+                        
+                        // Only trigger reconnection after 2 consecutive failures
+                        this.consecutiveStreamFailures++;
+                        if (this.consecutiveStreamFailures >= 2) {
+                            console.warn('🔄 Multiple keep-alive failures, triggering reconnection');
+                            this.handleReconnectAsync();
+                        } else {
+                            console.log('⚠️ Keep-alive failed, will retry in 15 seconds');
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('⚠️ Monitoring error:', error);
+                if (this.shouldReconnect(error)) {
+                    this.handleReconnectAsync();
+                }
+            }
+        }, 15000); // AGGRESSIVE 15-second keep-alives
+    }
+
+    private async performControlledReconnect(): Promise<void> {
+        console.log('🔄 Performing controlled reconnection with state reconciliation...');
+        
+        try {
+            // Get current state before reconnecting
+            const sessionString = this.getSessionString();
+            if (!sessionString) {
+                throw new Error('No session string available');
+            }
+
+            // Perform graceful reconnection
+            await this.gracefulReconnect(sessionString);
+            
+            // Reconcile state after reconnection using getState/getDifference
+            if (this.client && this.isConnected) {
+                try {
+                    const state = await this.client.invoke(new (await import('telegram')).Api.updates.GetState());
+                    console.log('✅ State reconciliation successful after reconnection');
+                    this.lastSuccessfulOperation = Date.now();
+                } catch (stateError) {
+                    console.warn('⚠️ State reconciliation failed, but connection appears stable:', stateError);
+                }
+            }
+            
+        } catch (error) {
+            console.error('❌ Controlled reconnection failed:', error);
+            this.handleReconnectAsync(); // Fall back to normal reconnection
+        }
+    }
+
+    private async startPollingFallback(): Promise<void> {
+        console.log('📊 Starting polling fallback mode...');
+        
+        this.pollingFallbackActive = true;
+        this.streamingHealthy = false;
+        
+        // Clear any existing polling interval
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+        }
+        
+        // Start polling every 30-60 seconds with jitter
+        const pollMessages = async () => {
+            try {
+                if (!this.client || !this.isConnected || !this.pollingFallbackActive) {
+                    return;
+                }
+                
+                console.log('📥 Polling for new messages...');
+                
+                // Poll each monitored channel
+                for (const channelId of this.monitoringChannels) {
+                    try {
+                        // Get recent messages (limit 5 to avoid overwhelming for low-traffic channels)
+                        const messages = await this.client.getMessages(channelId, { limit: 5 });
+                        
+                        // Process any new messages
+                        for (const message of messages) {
+                            if (message.text && message.date > (this.lastSuccessfulOperation / 1000)) {
+                                console.log(`📨 Found new message via polling: ${message.text.substring(0, 100)}...`);
+                                
+                                // Process message through local data pipeline  
+                                console.log(`⚡ Processing polled message ${message.id} locally...`);
+                                await processMessage({
+                                    message_id: `${channelId}_${message.id}`,
+                                    raw_message: message.text,
+                                    timestamp: new Date(message.date * 1000),
+                                });
+                            }
+                        }
+                        
+                        this.lastSuccessfulOperation = Date.now();
+                        
+                    } catch (channelError) {
+                        console.error(`⚠️ Polling error for channel ${channelId}:`, channelError);
+                    }
+                }
+                
+                // Try to restore streaming health periodically
+                await this.checkStreamingHealth();
+                
+            } catch (error) {
+                console.error('📊 Polling fallback error:', error);
+            }
+        };
+        
+        // Initial poll
+        await pollMessages();
+        
+        console.log('✅ Polling-only mode established - will check for messages every 2-5 minutes');
+        
+        // Set up interval with jitter (2-5 minutes for low-traffic channels)
+        const setJitteredInterval = () => {
+            const jitter = Math.random() * 180000 + 120000; // 2-5 minutes
+            this.pollingInterval = setTimeout(async () => {
+                await pollMessages();
+                if (this.pollingFallbackActive) {
+                    setJitteredInterval(); // Schedule next poll
+                }
+            }, jitter);
+        };
+        
+        setJitteredInterval();
+    }
+
+    private async checkStreamingHealth(): Promise<void> {
+        try {
+            // Every 5 minutes, try to restore streaming by testing connection health
+            if (Date.now() % 300000 < 60000) { // Roughly every 5 minutes
+                console.log('🔍 Testing streaming health for potential restoration...');
+                
+                const state = await this.client.invoke(new (await import('telegram')).Api.updates.GetState());
+                console.log('✅ State check successful, attempting to restore streaming');
+                
+                // Stop polling fallback
+                await this.stopPollingFallback();
+                
+                // Reset streaming health
+                this.streamingHealthy = true;
+                this.consecutiveStreamFailures = 0;
+                this.lastSuccessfulOperation = Date.now();
+                
+                console.log('🔄 Streaming restored successfully');
+            }
+        } catch (error) {
+            console.log('⚠️ Streaming still unhealthy, continuing polling fallback');
+        }
+    }
+
+    private async stopPollingFallback(): Promise<void> {
+        console.log('🛑 Stopping polling fallback mode');
+        
+        this.pollingFallbackActive = false;
+        
+        if (this.pollingInterval) {
+            clearTimeout(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+    }
+
+    private handleReconnectAsync(): void {
+        // Run reconnection in background to avoid blocking heartbeat
+        setImmediate(async () => {
+            try {
+                await this.handleReconnect();
+            } catch (error) {
+                console.error('🚨 Background reconnection failed:', error);
+            }
+        });
+    }
+
+    private startConnectionRefresh(): void {
+        // Clear existing refresh interval
+        if (this.connectionRefreshInterval) {
+            clearInterval(this.connectionRefreshInterval);
+        }
+
+        // Proactively refresh connection every 30 minutes to prevent long-running connection issues
+        this.connectionRefreshInterval = setInterval(async () => {
+            try {
+                const timeSinceLastSuccess = Date.now() - this.lastSuccessfulOperation;
+                const connectionAge = Date.now() - this.lastSuccessfulOperation;
+                
+                // For low-traffic channels: refresh if no activity in 20 minutes OR connection is 2+ hours old
+                const noRecentActivity = timeSinceLastSuccess > 1200000; // 20 minutes
+                const connectionTooOld = connectionAge > 7200000; // 2 hours
+                
+                if ((noRecentActivity || connectionTooOld) && this.isConnected) {
+                    const reason = connectionTooOld ? 'connection age (2+ hours)' : `no activity (${Math.round(timeSinceLastSuccess/60000)} minutes)`;
+                    console.log(`🔄 Proactive connection refresh - ${reason}`);
+                    
+                    const sessionString = this.getSessionString();
+                    if (sessionString) {
+                        // Gracefully disconnect and reconnect
+                        await this.gracefulReconnect(sessionString);
+                        this.lastSuccessfulOperation = Date.now();
+                    }
+                } else if (this.isConnected) {
+                    console.log(`✅ Connection stable - last activity: ${Math.round(timeSinceLastSuccess/60000)} minutes ago`);
+                }
+            } catch (error) {
+                console.error('⚠️ Connection refresh failed:', error);
+                // Don't throw - let normal error handling take over
+            }
+        }, 1800000); // 30 minutes
+    }
+
+    private async gracefulReconnect(sessionString: string): Promise<void> {
+        console.log('🔄 Starting graceful reconnection...');
+        
+        try {
+            // Save current monitoring state
+            const wasMonitoring = this.monitoringChannels.length > 0;
+            
+            // Stop monitoring and refresh timers
+            this.stopPassiveMonitoring();
+            this.stopConnectionRefresh();
+            
+            // DESTROY current client to properly stop update loop (GramJS fix)
+            if (this.client && this.isConnected) {
+                try {
+                    console.log('🔥 Destroying client for graceful reconnection');
+                    await this.client.destroy();
+                } catch (destroyError) {
+                    console.warn('⚠️ Error during graceful destroy:', destroyError);
+                }
+                this.client = null; // Clear reference for full cleanup
+            }
+            
+            // Small delay to ensure clean disconnect
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Recreate client completely with fresh instance
+            this.isConnected = false;
+            this.client = null; // Ensure clean slate
+            await this.connectWithSession(sessionString);
+            
+            console.log('✅ Graceful reconnection completed with fresh client instance');
+            
+        } catch (error) {
+            console.error('❌ Graceful reconnection failed:', error);
+            // Fall back to normal error handling
+            if (this.shouldReconnect(error)) {
+                this.handleReconnectAsync();
+            }
+        }
+    }
+
+    private stopPassiveMonitoring(): void {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+    }
+
+    private stopConnectionRefresh(): void {
+        if (this.connectionRefreshInterval) {
+            clearInterval(this.connectionRefreshInterval);
+            this.connectionRefreshInterval = null;
+        }
+    }
+
+    async disconnect(): Promise<void> {
+        this.stopPassiveMonitoring();
+        this.stopConnectionRefresh();
+        await this.stopPollingFallback();
+        
+        if (this.client && this.isConnected) {
+            try {
+                console.log('🔥 Using client.destroy() to properly stop update loop (GramJS fix)');
+                await this.client.destroy();
+            } catch (error) {
+                console.warn('⚠️ Error during destroy:', error);
+            }
+            this.isConnected = false;
+            this.client = null; // Clear reference for full cleanup
+            console.log('✅ Client destroyed and disconnected from Telegram');
         }
     }
 
@@ -327,52 +843,10 @@ class TelegramClient {
     }
 
     get isClientConnected(): boolean {
-        return this.isConnected && this.client && !this.client.disconnected;
+        return this.isConnected && this.client; // Don't check client.disconnected - it's unreliable
     }
 
-    private async sendToWebhook(message: {
-        message_id: string;
-        raw_message: string;
-        timestamp: string;
-        channel_id?: string;
-        channel_title?: string;
-    }): Promise<void> {
-        const webhookUrl = 'https://femdphkrpsyvdnhtfwhn.supabase.co/functions/v1/message-webhook';
-        
-        try {
-            const response = await fetch(webhookUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY}`,
-                },
-                body: JSON.stringify(message)
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`Webhook error: ${response.status} - ${errorText}`);
-            }
-
-            const result = await response.json();
-            console.log(`📤 Webhook response for ${message.message_id}:`, result);
-        } catch (error) {
-            console.error(`🚨 Failed to send message to webhook:`, error);
-            
-            // Fallback to local processing if webhook fails
-            try {
-                console.log('📋 Falling back to local processing...');
-                await processMessage({
-                    message_id: message.message_id,
-                    raw_message: message.raw_message,
-                    timestamp: new Date(message.timestamp),
-                });
-            } catch (fallbackError) {
-                console.error('❌ Fallback processing also failed:', fallbackError);
-                throw fallbackError;
-            }
-        }
-    }
+    // Webhook function removed - now using direct local processing
 }
 
 // Singleton instance
