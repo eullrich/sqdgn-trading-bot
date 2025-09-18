@@ -6,6 +6,8 @@ export interface ParseResult {
 	isValid: boolean;
 	parseErrors: string[];
 	callType?: string;
+	contractAddress?: string;
+	sqdgnLabel?: string;
 	metadata?: {
 		marketCap?: number;
 		volume24h?: number;
@@ -76,6 +78,13 @@ export class CallParser {
 			const walletData = this.parseWalletData(text);
 			const tokenInfo = this.parseTokenInfo(text);
 			const links = this.parseLinks(text);
+			const solanaAddress = this.parseSolanaAddress(text);
+
+			// Set contract address at top level for data pipeline
+			result.contractAddress = solanaAddress || undefined;
+
+			// Set SQDGN label at top level for data pipeline
+			result.sqdgnLabel = tokenInfo.label || undefined;
 
 			// Store additional data in result for later use
 			result.metadata = {
@@ -83,10 +92,10 @@ export class CallParser {
 				volume24h: marketData.volume,
 				liquidity: marketData.liquidity,
 				walletPnL: walletData.pnl,
-				tokenAge: this.parseTokenAge(text),
-				walletAddress: walletData.address,
-				transactionAmount: this.parseTransactionAmount(text),
-				solanaAddress: this.parseSolanaAddress(text),
+				tokenAge: this.parseTokenAge(text) || undefined,
+				walletAddress: walletData.address || undefined,
+				transactionAmount: this.parseTransactionAmount(text) || undefined,
+				solanaAddress: solanaAddress || undefined,
 				tokenName: tokenInfo.name,
 				label: tokenInfo.label,
 				creationDate: tokenInfo.creationDate,
@@ -286,10 +295,10 @@ Large trade noticed – observing immediate effects.
 		console.log(`\nTest ${index + 1}:`);
 		console.log('Input:', message.substring(0, 100) + (message.length > 100 ? '...' : ''));
 		console.log('Token:', result.tokenSymbol);
-		console.log('Signal:', result.signalType);
-		console.log('Price:', result.entryPrice);
-		console.log('Risk:', result.riskLevel);
-		console.log('Confidence:', result.confidence);
+		console.log('Call Type:', result.callType);
+		console.log('Market Cap:', result.metadata?.marketCap);
+		console.log('Volume:', result.metadata?.volume24h);
+		console.log('PnL:', result.metadata?.walletPnL);
 		console.log('Valid:', result.isValid);
 		if (result.metadata) {
 			console.log('Market Data:', {

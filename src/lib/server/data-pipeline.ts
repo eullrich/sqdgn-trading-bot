@@ -1,7 +1,9 @@
-import { supabaseAdmin, logAuditEvent } from './database';
+import { callsRepo, priceRepo, logAuditEvent } from './database';
 import { CallParser, type ParseResult } from './parsing';
+import { getTradingService, TradingService } from './services/trading/TradingService';
 import type { CallInsert, Call } from '../types';
 import { EVENT_TYPES, ENTITY_TYPES } from '../constants';
+import { getDexScreenerAPI } from './dex-screener';
 
 export interface ProcessingResult {
 	success: boolean;
@@ -22,7 +24,79 @@ export interface ValidationResult {
 }
 
 export class DataPipeline {
-	
+
+	/**
+	 * Capture initial price snapshot for a new call from DexScreener
+	 */
+	static async captureInitialPriceSnapshot(callId: string, tokenAddress: string, tokenSymbol?: string) {
+		try {
+			console.log(`🔍 Capturing initial price snapshot for ${tokenSymbol || tokenAddress}`);
+
+			const dexAPI = getDexScreenerAPI();
+			const tokenData = await dexAPI.getTokenPrice(tokenAddress);
+
+			if (!tokenData) {
+				console.warn(`⚠️ No price data found for token ${tokenSymbol || tokenAddress}`);
+				return null;
+			}
+
+			const token = tokenData;
+			const now = new Date();
+
+			try {
+				await priceRepo.batchInsertSnapshots([{
+					time: now,
+					tokenAddress: tokenAddress,
+					priceUsd: token.priceUsd || 0,
+					priceNative: null,
+					volume5m: null,
+					volume1h: null,
+					volume24h: token.volume24h || null,
+					liquidityUsd: token.liquidity || null,
+					marketCap: token.marketCap || null,
+					priceChange5m: null,
+					priceChange1h: token.priceChange1h || null,
+					priceChange24h: token.priceChange24h || null,
+					txnBuys5m: null,
+					txnSells5m: null,
+					dexId: token.dexId || null,
+					pairAddress: token.pairAddress || null,
+					source: 'dexscreener_initial'
+				}]);
+
+				console.log(`✅ Initial price snapshot captured for ${tokenSymbol || tokenAddress}: $${token.priceUsd}`);
+
+				// Update the call with initial price and market cap data
+				await callsRepo.update(callId, {
+					currentPriceUsd: token.priceUsd,
+					currentMarketCap: token.marketCap,
+					marketCapUpdatedAt: now,
+					priceUpdatedAt: now
+				});
+
+				// Log audit event
+				await logAuditEvent(
+					EVENT_TYPES.PRICE_UPDATE,
+					ENTITY_TYPES.CALL,
+					callId,
+					{
+						source: 'dexscreener_initial',
+						price_usd: token.priceUsd,
+						market_cap: token.marketCap,
+						token_address: tokenAddress
+					}
+				);
+			} catch (snapshotError) {
+				console.error(`❌ Failed to insert initial price snapshot:`, snapshotError);
+			}
+
+			return token;
+		} catch (error) {
+			console.error(`💥 Error capturing initial price snapshot:`, error);
+			return null;
+		}
+	}
+
 	static async processMessages(messages: Array<{
 		messageId: string;
 		text: string;
@@ -36,31 +110,34 @@ export class DataPipeline {
 			errors: []
 		};
 
+		console.log(`🔄 Processing ${messages.length} messages`);
+
 		for (const message of messages) {
 			try {
-				const processResult = await this.processSingleMessage(
+				result.processed++;
+
+				const messageResult = await this.processSingleMessage(
 					message.messageId,
 					message.text,
 					message.metadata
 				);
 
-				if (processResult.success) {
-					if (processResult.action === 'created') {
+				if (messageResult.success) {
+					if (messageResult.action === 'created') {
 						result.created++;
-					} else if (processResult.action === 'updated') {
+					} else if (messageResult.action === 'updated') {
 						result.updated++;
 					}
 				} else {
 					result.errors.push({
 						messageId: message.messageId,
-						error: processResult.error || 'Unknown error'
+						error: messageResult.error || 'Unknown error'
 					});
 				}
-
-				result.processed++;
-
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+				console.error(`❌ Error processing message ${message.messageId}:`, errorMessage);
+
 				result.errors.push({
 					messageId: message.messageId,
 					error: errorMessage
@@ -77,61 +154,59 @@ export class DataPipeline {
 		text: string,
 		metadata?: any
 	): Promise<{ success: boolean; action?: 'created' | 'updated' | 'skipped'; error?: string }> {
-		
+
 		// Check if message already exists
-		const { data: existingCall } = await supabaseAdmin
-			.from('calls')
-			.select('*')
-			.eq('message_id', messageId)
-			.single();
+		const existingCall = await callsRepo.findByMessageId(messageId);
 
 		// Parse the message
 		const parseResult = CallParser.parse(text);
-		
-		// Validate the parsed data
+
+		// Validate the call
 		const validation = this.validateCall(parseResult, text);
 
-		// Prepare call data
-		const callData: any = {
-			message_id: messageId,
-			raw_message: text,
-			token_symbol: parseResult.tokenSymbol || null,
-			is_valid: validation.isValid,
-			call_type: parseResult.callType || null,
-			// Set message_timestamp from metadata if available (from Telegram message date)
-			message_timestamp: metadata?.timestamp ? new Date(metadata.timestamp) : null,
-			// New dedicated columns
-			token_name: parseResult.metadata?.tokenName || null,
-			contract_address: parseResult.metadata?.solanaAddress || null,
-			blockchain: parseResult.metadata?.blockchain || null,
-			sqdgn_label: parseResult.metadata?.label || null,
-			creation_date: parseResult.metadata?.creationDate ? new Date(parseResult.metadata.creationDate) : null,
-			token_age: parseResult.metadata?.tokenAge || null,
-			market_cap: parseResult.metadata?.marketCap || null,
-			liquidity: parseResult.metadata?.liquidity || null,
-			volume_24h: parseResult.metadata?.volume24h || null,
-			dex_screener_url: parseResult.metadata?.dexScreenerUrl || null,
-			jupiter_url: parseResult.metadata?.jupiterUrl || null,
-			raydium_url: parseResult.metadata?.raydiumUrl || null,
-			// Keep metadata for backwards compatibility and additional fields
+		// Build call data
+		const callData = {
+			messageId: messageId,
+			rawMessage: text,
+			messageTimestamp: metadata?.timestamp ? new Date(metadata.timestamp) : null,
+			channel: metadata?.channelName || 'SQDGN_Solana_Direct', // Default to SQDGN if not provided
+			tokenSymbol: parseResult.tokenSymbol,
+			tokenName: parseResult.metadata?.tokenName,
+			contractAddress: parseResult.contractAddress,
+			blockchain: parseResult.metadata?.blockchain || 'solana',
+			sqdgnLabel: parseResult.sqdgnLabel,
+			callType: parseResult.callType,
+			marketCap: parseResult.metadata?.marketCap,
+			liquidity: parseResult.metadata?.liquidity,
+			volume24h: parseResult.metadata?.volume24h,
+			dexScreenerUrl: parseResult.metadata?.dexScreenerUrl,
+			jupiterUrl: parseResult.metadata?.jupiterUrl,
+			raydiumUrl: parseResult.metadata?.raydiumUrl,
 			metadata: {
 				...metadata,
-				...parseResult.metadata, // Include parsed metadata fields
+				...parseResult.metadata,
 				parse_errors: parseResult.parseErrors,
 				validation_warnings: validation.warnings,
-				processed_at: new Date().toISOString()
-			}
+			},
+			isValid: validation.isValid,
+			parsedAt: new Date()
 		};
 
 		if (existingCall) {
 			// Update existing call if confidence improved or data changed
 			if (this.shouldUpdateCall(existingCall, callData)) {
-				const { error } = await supabaseAdmin
-					.from('calls')
-					.update(callData as any)
-					.eq('message_id', messageId);
+				try {
+					await callsRepo.update(existingCall.id, callData);
 
-				if (error) {
+					await logAuditEvent(
+						EVENT_TYPES.CALL_UPDATED,
+						ENTITY_TYPES.CALL,
+						messageId,
+						{ confidence: parseResult.confidence, is_valid: validation.isValid }
+					);
+
+					return { success: true, action: 'updated' };
+				} catch (error: any) {
 					await logAuditEvent(
 						EVENT_TYPES.ERROR,
 						ENTITY_TYPES.CALL,
@@ -140,27 +215,51 @@ export class DataPipeline {
 					);
 					return { success: false, error: error.message };
 				}
-
-				await logAuditEvent(
-					EVENT_TYPES.CALL_UPDATED,
-					ENTITY_TYPES.CALL,
-					messageId,
-					{ confidence: parseResult.confidence, is_valid: validation.isValid }
-				);
-
-				return { success: true, action: 'updated' };
 			}
 
 			return { success: true, action: 'skipped' };
 		} else {
 			// Create new call
-			const { error, data } = await supabaseAdmin
-				.from('calls')
-				.insert(callData as any)
-				.select()
-				.single();
+			try {
+				const data = await callsRepo.create(callData);
 
-			if (error) {
+				await logAuditEvent(
+					EVENT_TYPES.CALL_CREATED,
+					ENTITY_TYPES.CALL,
+					data.id,
+					{ confidence: parseResult.confidence, is_valid: validation.isValid }
+				);
+
+				// Capture initial price snapshot if we have a contract address
+				if (callData.contractAddress && validation.isValid) {
+					// Do this in background to avoid blocking the main pipeline
+					this.captureInitialPriceSnapshot(
+						data.id,
+						callData.contractAddress,
+						callData.tokenSymbol
+					).catch(error => {
+						console.error('Failed to capture initial price snapshot:', error);
+					});
+				}
+
+				// Process signal for auto-trading if valid
+				if (validation.isValid && parseResult.tokenSymbol && callData.contractAddress) {
+					try {
+						const tradingService = getTradingService();
+						const signal = TradingService.extractTokenFromCall(data as any);
+						if (signal) {
+							// Process signal in background to avoid blocking the pipeline
+							tradingService.processSignal(signal).catch(error => {
+								console.error('Failed to process trading signal:', error);
+							});
+						}
+					} catch (error) {
+						console.error('Error initializing trading service for signal processing:', error);
+					}
+				}
+
+				return { success: true, action: 'created' };
+			} catch (error: any) {
 				await logAuditEvent(
 					EVENT_TYPES.ERROR,
 					ENTITY_TYPES.CALL,
@@ -169,15 +268,6 @@ export class DataPipeline {
 				);
 				return { success: false, error: error.message };
 			}
-
-			await logAuditEvent(
-				EVENT_TYPES.CALL_CREATED,
-				ENTITY_TYPES.CALL,
-				(data as any)?.id,
-				{ confidence: parseResult.confidence, is_valid: validation.isValid }
-			);
-
-			return { success: true, action: 'created' };
 		}
 	}
 
@@ -189,171 +279,74 @@ export class DataPipeline {
 			confidence: 1.0 // Simple binary validation now
 		};
 
-		// Copy parsing errors
-		validation.errors = [...parseResult.parseErrors];
-
-		// Simple validation - just check if we have a token symbol
+		// Basic validation - must have at least a token symbol
 		if (!parseResult.tokenSymbol) {
-			validation.errors.push('Token symbol is required');
 			validation.isValid = false;
-		} else if (parseResult.tokenSymbol.length < 2 || parseResult.tokenSymbol.length > 15) {
-			validation.warnings.push('Token symbol length is unusual');
+			validation.errors.push('No token symbol found');
 		}
 
-		// Check for spam patterns
-		if (this.isSpamMessage(originalText)) {
-			validation.warnings.push('Message might be spam');
-			validation.isValid = false;
+		// Warn if no contract address
+		if (!parseResult.contractAddress) {
+			validation.warnings.push('No contract address found');
 		}
 
-		// Check for common false positives
-		if (this.isFalsePositive(originalText)) {
-			validation.isValid = false;
-			validation.errors.push('Detected as false positive');
+		// Warn if text is too short (likely spam or incomplete)
+		if (originalText.length < 10) {
+			validation.warnings.push('Message text is very short');
 		}
+
+		// Set confidence based on how much data we extracted
+		const dataPoints = [
+			parseResult.tokenSymbol,
+			parseResult.contractAddress,
+			parseResult.tokenName,
+			parseResult.marketCap,
+			parseResult.sqdgnLabel
+		].filter(Boolean).length;
+
+		validation.confidence = Math.min(dataPoints / 3, 1.0); // Normalize to max 1.0
 
 		return validation;
 	}
 
-	private static shouldUpdateCall(existingCall: Call, newData: CallInsert): boolean {
-		// Update if previously invalid call became valid
-		if (!existingCall.is_valid && newData.is_valid) {
+	static shouldUpdateCall(existingCall: any, newCallData: any): boolean {
+		// Only update if we have more/better data
+		if (!existingCall.contractAddress && newCallData.contractAddress) {
 			return true;
 		}
 
-		// Update if new data has more fields filled
-		const existingFieldCount = [
-			existingCall.token_symbol,
-			existingCall.call_type,
-			existingCall.sqdgn_label,
-			existingCall.market_cap,
-			existingCall.liquidity
-		].filter(Boolean).length;
-
-		const newFieldCount = [
-			newData.token_symbol,
-			newData.call_type,
-			newData.sqdgn_label,
-			newData.market_cap,
-			newData.liquidity
-		].filter(Boolean).length;
-
-		return newFieldCount > existingFieldCount;
-	}
-
-	private static isSpamMessage(text: string): boolean {
-		const spamPatterns = [
-			/telegram\.me|t\.me/i,
-			/join.*group|group.*join/i,
-			/premium.*signal|signal.*premium/i,
-			/\b(scam|fraud|fake)\b/i,
-			/click.*here|here.*click/i,
-			/\b(dm|pm).*me\b/i
-		];
-
-		return spamPatterns.some(pattern => pattern.test(text));
-	}
-
-	private static isFalsePositive(text: string): boolean {
-		const falsePositivePatterns = [
-			/\b(joke|kidding|lol|haha)\b/i,
-			/\b(not.*financial.*advice|nfa)\b/i,
-			/\b(paper.*trading|demo.*account)\b/i,
-			/\b(what.*if|imagine.*if)\b/i,
-			/\b(old.*call|past.*call)\b/i
-		];
-
-		return falsePositivePatterns.some(pattern => pattern.test(text));
-	}
-
-	// Batch processing for better performance
-	static async batchProcessMessages(
-		messages: Array<{ messageId: string; text: string; metadata?: any }>,
-		batchSize: number = 10
-	): Promise<ProcessingResult> {
-		const totalResult: ProcessingResult = {
-			success: true,
-			processed: 0,
-			created: 0,
-			updated: 0,
-			errors: []
-		};
-
-		// Process in batches to avoid overwhelming the database
-		for (let i = 0; i < messages.length; i += batchSize) {
-			const batch = messages.slice(i, i + batchSize);
-			const batchResult = await this.processMessages(batch);
-
-			// Combine results
-			totalResult.processed += batchResult.processed;
-			totalResult.created += batchResult.created;
-			totalResult.updated += batchResult.updated;
-			totalResult.errors.push(...batchResult.errors);
-
-			if (!batchResult.success) {
-				totalResult.success = false;
-			}
-
-			// Add small delay between batches to be gentle on the database
-			if (i + batchSize < messages.length) {
-				await new Promise(resolve => setTimeout(resolve, 100));
-			}
+		if (!existingCall.tokenName && newCallData.tokenName) {
+			return true;
 		}
 
-		return totalResult;
+		if (!existingCall.marketCap && newCallData.marketCap) {
+			return true;
+		}
+
+		return false;
 	}
 
-	// Cleanup old or invalid data
-	static async cleanupData(daysOld: number = 30): Promise<{ deletedCalls: number; deletedLogs: number }> {
-		const cutoffDate = new Date();
-		cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-
-		// Delete old audit logs
-		const { count: deletedLogs } = await supabaseAdmin
-			.from('audit_logs')
-			.delete({ count: 'exact' })
-			.lt('created_at', cutoffDate.toISOString());
-
-		// Delete old invalid calls with very low confidence
-		const { count: deletedCalls } = await supabaseAdmin
-			.from('calls')
-			.delete({ count: 'exact' })
-			.lt('created_at', cutoffDate.toISOString())
-			.eq('is_valid', false)
-			.lt('confidence', 0.2);
-
-		await logAuditEvent(
-			'DATA_CLEANUP',
-			'SYSTEM',
-			null,
-			{
-				deleted_calls: deletedCalls,
-				deleted_logs: deletedLogs,
-				cutoff_date: cutoffDate.toISOString()
-			}
-		);
-
-		return {
-			deletedCalls: deletedCalls || 0,
-			deletedLogs: deletedLogs || 0
-		};
+	/**
+	 * Cleanup old invalid calls
+	 */
+	static async cleanupOldCalls(): Promise<void> {
+		try {
+			// For now, this is a placeholder since we don't have a direct delete method
+			// In the future we could add a cleanup method to the repository
+			console.log('Cleanup functionality would be implemented here');
+		} catch (error) {
+			console.error('Error cleaning up old calls:', error);
+		}
 	}
 }
 
-// Helper function for the telegram client
+/**
+ * Process a single message (exported function for Telegram monitor)
+ */
 export async function processMessage(message: {
-	message_id: string;
-	raw_message: string;
-	timestamp: Date;
-}): Promise<void> {
-	try {
-		await DataPipeline.processSingleMessage(
-			message.message_id,
-			message.raw_message,
-			{ timestamp: message.timestamp.toISOString() }
-		);
-	} catch (error) {
-		console.error(`Failed to process message ${message.message_id}:`, error);
-		throw error;
-	}
+	messageId: string;
+	text: string;
+	metadata?: any;
+}): Promise<{ success: boolean; action?: string; error?: string }> {
+	return DataPipeline.processSingleMessage(message.messageId, message.text, message.metadata);
 }

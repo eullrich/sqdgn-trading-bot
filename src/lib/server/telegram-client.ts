@@ -5,6 +5,8 @@ import events from 'telegram/events';
 const { TelegramClient: TelegramApiClient } = pkg;
 const { NewMessage } = events;
 import { processMessage } from './data-pipeline';
+import { processFastMessage } from './fast-message-processor';
+import { isFastProcessingEnabled } from './processing-mode';
 // import type { Message } from 'telegram/tl/custom/message';
 
 class TelegramClient {
@@ -80,19 +82,27 @@ class TelegramClient {
         this.isConnected = true;
     }
 
-    async connectWithSession(sessionString: string): Promise<void> {
+    async connectWithSession(sessionString: string, apiId?: number, apiHash?: string): Promise<void> {
         if (this.isConnected) return;
 
-        const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
-        const apiHash = process.env.TELEGRAM_API_HASH || '';
+        // Validate session string before attempting connection
+        if (!sessionString || sessionString.trim() === '') {
+            throw new Error('Cannot connect: Empty or invalid session string provided');
+        }
 
-        if (!apiId || !apiHash) {
+        // Use passed credentials first, then fall back to environment
+        const telegramApiId = apiId || parseInt(process.env.TELEGRAM_API_ID || '0');
+        const telegramApiHash = apiHash || process.env.TELEGRAM_API_HASH || '';
+
+        if (!telegramApiId || !telegramApiHash) {
             throw new Error('Missing Telegram API credentials in environment variables');
         }
 
+        console.log('🔑 Session validation passed, proceeding with connection...');
+
         // Create session from stored string
         this.session = new StringSession(sessionString);
-        this.client = new TelegramApiClient(this.session, apiId, apiHash, {
+        this.client = new TelegramApiClient(this.session, telegramApiId, telegramApiHash, {
             connectionRetries: 5,
             retryDelay: 2000,
             timeout: 90,           // Increased timeout for 2.25.x stability
@@ -123,36 +133,43 @@ class TelegramClient {
         this.startConnectionRefresh();
     }
 
-    async startListening(): Promise<void> {
+    async startListening(channelUsername?: string): Promise<void> {
         if (!this.client) {
             throw new Error('Client not connected. Call connect() first.');
         }
 
-        const channelUsername = process.env.SQDGN_CHANNEL_USERNAME;
-        if (!channelUsername) {
-            throw new Error('SQDGN_CHANNEL_USERNAME not set in environment variables');
+        const channel = channelUsername || process.env.SQDGN_CHANNEL_USERNAME;
+        if (!channel) {
+            throw new Error('Channel username not provided and SQDGN_CHANNEL_USERNAME not set in environment variables');
         }
 
-        console.log(`Starting to listen for messages in ${channelUsername}...`);
+        console.log(`Starting to listen for messages in ${channel}...`);
 
         // Get the channel entity
-        const channel = await this.client.getEntity(channelUsername);
+        const channelEntity = await this.client.getEntity(channel);
 
         // Add event handler for new messages
         this.client.addEventHandler(async (event: any) => {
             const message = event.message;
             
             // Only process messages from the target channel
-            if (message.chatId?.toString() === channel.id.toString()) {
+            if (message.chatId?.toString() === channelEntity.id.toString()) {
                 console.log(`New message received: ${message.text?.substring(0, 100)}...`);
                 
                 try {
-                    // Process locally via data pipeline
-                    await processMessage({
+                    const messageData = {
                         message_id: message.id.toString(),
                         raw_message: message.text || '',
                         timestamp: new Date(message.date * 1000),
-                    });
+                    };
+
+                    if (isFastProcessingEnabled()) {
+                        // Use fast processor for immediate DB insertion
+                        await processFastMessage(messageData);
+                    } else {
+                        // Use normal processor with sequential processing
+                        await processMessage(messageData);
+                    }
                 } catch (error) {
                     console.error('Error processing message:', error);
                 }
@@ -262,11 +279,17 @@ class TelegramClient {
                     try {
                         // Process message directly with local data pipeline
                         console.log(`⚡ Processing message ${message.id} locally...`);
-                        await processMessage({
+                        const messageData = {
                             message_id: `${messageChannelId}_${message.id}`,
                             raw_message: message.text,
                             timestamp: new Date(message.date * 1000),
-                        });
+                        };
+
+                        if (isFastProcessingEnabled()) {
+                            await processFastMessage(messageData);
+                        } else {
+                            await processMessage(messageData);
+                        }
                         console.log(`✅ Successfully processed message ${message.id} from ${channelName}`);
                         this.lastSuccessfulOperation = Date.now();
                     } catch (error) {
@@ -294,20 +317,20 @@ class TelegramClient {
         }
     }
 
-    async getRecentMessages(limit: number = 100): Promise<void> {
+    async getRecentMessages(limit: number = 100, channelUsername?: string): Promise<void> {
         if (!this.client) {
             throw new Error('Client not connected. Call connect() first.');
         }
 
-        const channelUsername = process.env.SQDGN_CHANNEL_USERNAME;
-        if (!channelUsername) {
-            throw new Error('SQDGN_CHANNEL_USERNAME not set in environment variables');
+        const channel = channelUsername || process.env.SQDGN_CHANNEL_USERNAME;
+        if (!channel) {
+            throw new Error('Channel username not provided and SQDGN_CHANNEL_USERNAME not set in environment variables');
         }
 
-        console.log(`Fetching last ${limit} messages from ${channelUsername}...`);
+        console.log(`Fetching last ${limit} messages from ${channel}...`);
 
-        const channel = await this.client.getEntity(channelUsername);
-        const messages = await this.client.getMessages(channel, { limit });
+        const channelEntity = await this.client.getEntity(channel);
+        const messages = await this.client.getMessages(channelEntity, { limit });
 
         console.log(`Retrieved ${messages.length} messages`);
 
@@ -316,11 +339,17 @@ class TelegramClient {
             if (message.text) {
                 try {
                     // Process message directly with local data pipeline
-                    await processMessage({
+                    const messageData = {
                         message_id: message.id.toString(),
                         raw_message: message.text,
                         timestamp: new Date(message.date * 1000),
-                    });
+                    };
+
+                    if (isFastProcessingEnabled()) {
+                        await processFastMessage(messageData);
+                    } else {
+                        await processMessage(messageData);
+                    }
                 } catch (error) {
                     console.error(`Error processing message ${message.id}:`, error);
                 }
@@ -374,11 +403,17 @@ class TelegramClient {
                     if (message.text) {
                         try {
                             // Process message directly with local data pipeline
-                            await processMessage({
+                            const messageData = {
                                 message_id: `${channelInfo.id}_${message.id}`,
                                 raw_message: message.text,
                                 timestamp: new Date(message.date * 1000),
-                            });
+                            };
+
+                            if (isFastProcessingEnabled()) {
+                                await processFastMessage(messageData);
+                            } else {
+                                await processMessage(messageData);
+                            }
                             totalMessages++;
                         } catch (error) {
                             console.error(`Error processing message ${message.id} from ${channelInfo.title}:`, error);
@@ -402,6 +437,13 @@ class TelegramClient {
     }
 
     private shouldReconnect(error: any): boolean {
+        // Always prevent reconnection if no session string is available
+        const sessionString = this.getSessionString();
+        if (!sessionString) {
+            console.warn('🚫 Preventing reconnection: No valid session string available');
+            return false;
+        }
+
         // Check circuit breaker
         if (this.isCircuitBreakerOpen) {
             console.warn('🚦 Circuit breaker is open - skipping reconnection attempt');
@@ -641,11 +683,17 @@ class TelegramClient {
                                 
                                 // Process message through local data pipeline  
                                 console.log(`⚡ Processing polled message ${message.id} locally...`);
-                                await processMessage({
+                                const messageData = {
                                     message_id: `${channelId}_${message.id}`,
                                     raw_message: message.text,
                                     timestamp: new Date(message.date * 1000),
-                                });
+                                };
+
+                                if (isFastProcessingEnabled()) {
+                                    await processFastMessage(messageData);
+                                } else {
+                                    await processMessage(messageData);
+                                }
                             }
                         }
                         

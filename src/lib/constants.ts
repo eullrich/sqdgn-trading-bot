@@ -26,6 +26,7 @@ export const EVENT_TYPES = {
 	BOT_DECISION: 'BOT_DECISION',
 	BOT_EXECUTION: 'BOT_EXECUTION',
 	USER_LOGIN: 'USER_LOGIN',
+	PRICE_UPDATE: 'PRICE_UPDATE',
 	ERROR: 'ERROR'
 } as const;
 
@@ -44,3 +45,6 @@ export const DEFAULT_TRADING_RULES = {
 	stopLoss: 0.1,
 	takeProfit: 0.2
 } as const;
+
+// Testing wallet address - used when no wallet is connected or for testing purposes
+export const TESTING_WALLET_ADDRESS = 'GDDRBoNEmEnBo1QG7TVhiNje1CZwu2wZ61py28W81e4Z';

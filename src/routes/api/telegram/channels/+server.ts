@@ -1,105 +1,51 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import pkg from 'telegram';
-import { StringSession } from 'telegram/sessions';
-import { TELEGRAM_API_ID, TELEGRAM_API_HASH } from '$env/static/private';
-
-const { TelegramClient } = pkg;
+import { fetchTelegramChannels } from '$lib/server/session-helpers';
 
 export const GET: RequestHandler = async ({ cookies }) => {
 	try {
 		const sessionString = cookies.get('telegram_session');
-		
-		if (!sessionString) {
+
+		if (!sessionString || sessionString.trim() === '') {
 			return json({
 				success: false,
 				error: 'Not authenticated'
 			}, { status: 401 });
 		}
 
-		// Create client with stored session
-		const session = new StringSession(sessionString);
-		const apiId = parseInt(TELEGRAM_API_ID || '0');
-		const apiHash = TELEGRAM_API_HASH || '';
-		
-		if (!apiId || !apiHash) {
-			console.error('Missing Telegram API credentials:', { apiId: !!apiId, apiHash: !!apiHash });
-			return json({
-				success: false,
-				error: 'Server configuration error: Missing Telegram API credentials'
-			}, { status: 500 });
-		}
+		// Fetch channels using the session
+		const channels = await fetchTelegramChannels(sessionString);
 
-		const client = new TelegramClient(session, apiId, apiHash, {
-			connectionRetries: 5,
-		});
-
-		await client.connect();
-
-		try {
-			// Get all dialogs (conversations)
-			const dialogs = await client.getDialogs({ limit: 100 });
-			
-			const channels = [];
-			
-			for (const dialog of dialogs) {
-				const entity = dialog.entity;
-				
-				// Filter for channels and groups only
-				if (entity.className === 'Channel' || entity.className === 'Chat') {
-					console.log('📍 Entity details:', {
-						className: entity.className,
-						id: entity.id.toString(),
-						title: entity.title,
-						username: entity.username
-					});
-					
-					// Store the entity itself for easier retrieval later
-					let channelId = entity.id.toString();
-					if (entity.className === 'Channel') {
-						// For channels, store the raw ID but also try to determine proper format
-						console.log('🔍 Channel entity:', entity);
-					}
-					
-					const channelInfo = {
-						id: channelId,
-						accessHash: entity.accessHash?.toString() || null,
-						title: entity.title || 'Untitled',
-						username: entity.username || null,
-						type: entity.className === 'Channel' ? 
-							(entity.broadcast ? 'channel' : 'supergroup') : 'group',
-						description: entity.about || null,
-						memberCount: entity.participantsCount || 0,
-						isPublic: !!entity.username,
-						isAdmin: false, // We'll determine this if needed
-						canPostMessages: false // We'll determine this if needed
-					};
-					
-					// Only include channels we can read
-					if (!entity.left && !entity.kicked) {
-						channels.push(channelInfo);
-					}
-				}
-			}
-
-			// Sort by member count descending
-			channels.sort((a, b) => b.memberCount - a.memberCount);
-
-			await client.disconnect();
-
-			return json({
-				success: true,
-				channels
+		if (channels === null) {
+			// Clear invalid session cookie
+			cookies.delete('telegram_session', {
+				path: '/',
+				httpOnly: true,
+				secure: process.env.NODE_ENV === 'production',
+				sameSite: 'strict'
 			});
 
-		} catch (error) {
-			await client.disconnect();
-			throw error;
+			return json({
+				success: false,
+				error: 'Invalid or expired session'
+			}, { status: 401 });
 		}
+
+		if (channels.length === 0) {
+			return json({
+				success: false,
+				error: 'No channels found. Make sure you have access to Telegram channels.'
+			}, { status: 404 });
+		}
+
+		return json({
+			success: true,
+			channels
+		});
 
 	} catch (error) {
 		console.error('Failed to fetch channels:', error);
-		
+
 		return json({
 			success: false,
 			error: error instanceof Error ? error.message : 'Failed to fetch channels'

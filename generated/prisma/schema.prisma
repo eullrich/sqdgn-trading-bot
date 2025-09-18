@@ -1,0 +1,319 @@
+// SQDGN Trading Bot Prisma Schema
+// Optimized version of the Supabase database schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core trading signals from SQDGN Telegram channel
+model Call {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Message data
+  messageId        String    @unique @map("message_id")
+  rawMessage       String    @map("raw_message")
+  messageTimestamp DateTime? @map("message_timestamp")
+
+  // Parsed token data
+  tokenSymbol     String? @map("token_symbol")
+  tokenName       String? @map("token_name")
+  contractAddress String? @map("contract_address")
+  blockchain      String? @default("solana")
+
+  // SQDGN classification
+  sqdgnLabel String? @map("sqdgn_label") // NEWBORN, ESTABLISHED, VETERAN, MATURING
+  callType   String? @map("call_type") // market_activity, transaction_spotted, etc.
+
+  // Market data at time of call
+  marketCap Decimal? @map("market_cap")
+  liquidity Decimal?
+  volume24h Decimal? @map("volume_24h")
+
+  // Current market data (updated periodically)
+  currentPriceUsd    Decimal?  @map("current_price_usd")
+  priceUpdatedAt     DateTime? @map("price_updated_at")
+  currentMarketCap   Decimal?  @map("current_market_cap")
+  marketCapUpdatedAt DateTime? @map("market_cap_updated_at")
+
+  // URLs for trading platforms
+  dexScreenerUrl String? @map("dex_screener_url")
+  jupiterUrl     String? @map("jupiter_url")
+  raydiumUrl     String? @map("raydium_url")
+
+  // Metadata and validation
+  metadata Json?
+  isValid  Boolean  @default(true) @map("is_valid")
+  parsedAt DateTime @default(now()) @map("parsed_at")
+
+  // Relations
+  tradingPositions TradingPosition[]
+  autoBuyQueue     AutoBuyQueue[]
+
+  @@map("calls")
+}
+
+// Time series price data from DexScreener
+model TokenPriceSnapshot {
+  time         DateTime @map("time")
+  tokenAddress String   @map("token_address")
+
+  // Price data
+  priceUsd    Float  @map("price_usd")
+  priceNative Float? @map("price_native")
+  marketCap   Float? @map("market_cap")
+
+  // Volume data
+  volume5m  Float? @map("volume_5m")
+  volume1h  Float? @map("volume_1h")
+  volume24h Float? @map("volume_24h")
+
+  // Liquidity and metrics
+  liquidityUsd Float? @map("liquidity_usd")
+
+  // Price changes
+  priceChange5m  Float? @map("price_change_5m")
+  priceChange1h  Float? @map("price_change_1h")
+  priceChange24h Float? @map("price_change_24h")
+
+  // Transaction data
+  txnBuys5m  Int? @map("txn_buys_5m")
+  txnSells5m Int? @map("txn_sells_5m")
+
+  // DEX info
+  dexId       String? @map("dex_id")
+  pairAddress String? @map("pair_address")
+  source      String  @default("dexscreener")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([time, tokenAddress])
+  @@map("token_price_snapshots_5m")
+}
+
+// User trading positions
+model TradingPosition {
+  id                String @id @default(uuid())
+  userWalletAddress String @map("user_wallet_address")
+
+  // Token info
+  tokenAddress String  @map("token_address")
+  tokenSymbol  String? @map("token_symbol")
+
+  // Entry data
+  entryPrice        Decimal @map("entry_price")
+  entryAmountSol    Decimal @map("entry_amount_sol")
+  entryAmountTokens Decimal @map("entry_amount_tokens")
+  entryTxSignature  String? @map("entry_tx_signature")
+
+  // Current position data
+  currentPrice    Decimal? @map("current_price")
+  currentValueSol Decimal? @map("current_value_sol")
+  highestPrice    Decimal? @map("highest_price")
+
+  // P&L tracking
+  realizedPnlSol          Decimal @default(0) @map("realized_pnl_sol")
+  unrealizedPnlSol        Decimal @default(0) @map("unrealized_pnl_sol")
+  unrealizedPnlPercentage Decimal @default(0) @map("unrealized_pnl_percentage")
+
+  // Risk management
+  stopLossPrice          Decimal? @map("stop_loss_price")
+  takeProfitPrice        Decimal? @map("take_profit_price")
+  trailingStopPercentage Decimal? @map("trailing_stop_percentage")
+
+  // Exit data
+  exitPrice       Decimal? @map("exit_price")
+  exitAmountSol   Decimal? @map("exit_amount_sol")
+  exitReason      String?  @map("exit_reason")
+  exitTxSignature String?  @map("exit_tx_signature")
+
+  // Status and timing
+  status      String    @default("open") // open, closed, partial
+  openedAt    DateTime  @default(now()) @map("opened_at")
+  closedAt    DateTime? @map("closed_at")
+  lastUpdated DateTime  @default(now()) @updatedAt @map("last_updated")
+
+  // Relations
+  callId String? @map("call_id")
+  call   Call?   @relation(fields: [callId], references: [id])
+
+  trailingStops TrailingStop[]
+  tradeHistory  TradeHistory[]
+  priceAlerts   PriceAlert[]
+
+  @@map("trading_positions")
+}
+
+// Automated trailing stop management
+model TrailingStop {
+  id         String  @id @default(uuid())
+  positionId String? @unique @map("position_id")
+
+  highestPrice       Decimal @map("highest_price")
+  currentStopPrice   Decimal @map("current_stop_price")
+  trailingPercentage Decimal @map("trailing_percentage")
+
+  isActive      Boolean   @default(true) @map("is_active")
+  lastCheckedAt DateTime  @default(now()) @map("last_checked_at")
+  triggeredAt   DateTime? @map("triggered_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  // Relations
+  position TradingPosition? @relation(fields: [positionId], references: [id])
+
+  @@map("trailing_stops")
+}
+
+// User trading configuration
+model UserTradingConfig {
+  id                String  @id @default(uuid())
+  userWalletAddress String  @unique @map("user_wallet_address")
+  telegramUserId    String? @map("telegram_user_id")
+
+  // Auto-buy settings
+  isAutoBuyEnabled    Boolean @default(false) @map("is_auto_buy_enabled")
+  defaultBuyAmountSol Decimal @default(0.1) @map("default_buy_amount_sol")
+  maxPositionSizeSol  Decimal @default(1.0) @map("max_position_size_sol")
+
+  // Trading settings
+  defaultSlippageBps Int @default(100) @map("default_slippage_bps")
+  maxSlippageBps     Int @default(500) @map("max_slippage_bps")
+
+  // Risk management
+  trailingStopEnabled    Boolean @default(true) @map("trailing_stop_enabled")
+  trailingStopPercentage Decimal @default(10.0) @map("trailing_stop_percentage")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("user_trading_config")
+}
+
+// Auto-buy queue for processing signals
+model AutoBuyQueue {
+  id                String @id @default(uuid())
+  userWalletAddress String @map("user_wallet_address")
+
+  // Signal data
+  callId       String? @map("call_id")
+  tokenAddress String? @map("token_address")
+  tokenSymbol  String  @map("token_symbol")
+
+  // Order parameters
+  buyAmountSol Decimal  @map("buy_amount_sol")
+  maxPrice     Decimal? @map("max_price")
+  slippageBps  Int?     @default(100) @map("slippage_bps")
+
+  // Status tracking
+  status       String  @default("pending") @map("status") // pending, processing, completed, failed, cancelled
+  errorMessage String? @map("error_message")
+
+  // Relations
+  tradeId String? @map("trade_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  processedAt DateTime? @map("processed_at")
+
+  // Relations
+  call  Call?         @relation(fields: [callId], references: [id])
+  trade TradeHistory? @relation(fields: [tradeId], references: [id])
+
+  @@map("auto_buy_queue")
+}
+
+// Trade execution history
+model TradeHistory {
+  id                String  @id @default(uuid())
+  positionId        String? @map("position_id")
+  userWalletAddress String  @map("user_wallet_address")
+
+  // Token info
+  tokenAddress String  @map("token_address")
+  tokenSymbol  String? @map("token_symbol")
+
+  // Trade details
+  tradeType    String  @map("trade_type") // buy, sell
+  amountSol    Decimal @map("amount_sol")
+  amountTokens Decimal @map("amount_tokens")
+  price        Decimal
+
+  // Execution details
+  slippageBps    Int?     @map("slippage_bps")
+  priceImpactPct Decimal? @map("price_impact_pct")
+  txSignature    String?  @unique @map("tx_signature")
+  txStatus       String   @default("pending") @map("tx_status") // pending, confirmed, failed
+  errorMessage   String?  @map("error_message")
+
+  // Jupiter integration
+  jupiterQuote Json? @map("jupiter_quote")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  confirmedAt DateTime? @map("confirmed_at")
+
+  // Relations
+  position     TradingPosition? @relation(fields: [positionId], references: [id])
+  autoBuyQueue AutoBuyQueue[]
+
+  @@map("trade_history")
+}
+
+// Price alerts for positions
+model PriceAlert {
+  id                String  @id @default(uuid())
+  positionId        String? @map("position_id")
+  userWalletAddress String  @map("user_wallet_address")
+  tokenAddress      String  @map("token_address")
+
+  alertType   String  @map("alert_type") // stop_loss, take_profit, trailing_stop, price_target
+  targetPrice Decimal @map("target_price")
+
+  isActive    Boolean   @default(true) @map("is_active")
+  triggeredAt DateTime? @map("triggered_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  position TradingPosition? @relation(fields: [positionId], references: [id])
+
+  @@map("price_alerts")
+}
+
+// System audit logging
+model AuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  eventType  String  @map("event_type")
+  entityType String  @map("entity_type")
+  entityId   String? @map("entity_id")
+  userId     String? @map("user_id")
+
+  details   Json?
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent")
+
+  @@map("audit_logs")
+}
+
+// Data ingestion tracking
+model IngestionRun {
+  runId     String    @id @default(uuid()) @map("run_id")
+  startedAt DateTime  @default(now()) @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  ok               Boolean? @map("ok")
+  tokensProcessed  Int?     @map("tokens_processed")
+  rowsInserted     Int?     @map("rows_inserted")
+  vendorRateStatus Json?    @map("vendor_rate_status")
+  errorMessage     String?  @map("error_message")
+  dataType         String   @default("candles") @map("data_type")
+
+  @@map("ingestion_runs")
+}

@@ -8,7 +8,7 @@ declare global {
 	var activeSessions: Map<string, any>;
 }
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, cookies }) => {
 	try {
 		const { sessionId, verificationCode, password } = await request.json();
 
@@ -73,14 +73,22 @@ export const POST: RequestHandler = async ({ request }) => {
 				// Success - authentication completed
 				const sessionString = client.session.save();
 				console.log('✅ Verification successful, cleaning up');
-				
+
+				// Set the session cookie server-side
+				cookies.set('telegram_session', sessionString, {
+					path: '/',
+					httpOnly: true,
+					secure: process.env.NODE_ENV === 'production',
+					sameSite: 'strict',
+					maxAge: 60 * 60 * 24 * 30 // 30 days
+				});
+
 				// Clean up
 				await client.disconnect();
 				global.activeSessions?.delete(sessionId);
 
 				return json({
 					success: true,
-					sessionString,
 					message: 'Successfully verified and connected to Telegram'
 				});
 				
@@ -140,14 +148,22 @@ export const POST: RequestHandler = async ({ request }) => {
 				// Success - authentication completed
 				const sessionString = client.session.save();
 				console.log('✅ 2FA verification successful, cleaning up');
-				
+
+				// Set the session cookie server-side
+				cookies.set('telegram_session', sessionString, {
+					path: '/',
+					httpOnly: true,
+					secure: process.env.NODE_ENV === 'production',
+					sameSite: 'strict',
+					maxAge: 60 * 60 * 24 * 30 // 30 days
+				});
+
 				// Clean up
 				await client.disconnect();
 				global.activeSessions?.delete(sessionId);
 
 				return json({
 					success: true,
-					sessionString,
 					message: 'Successfully verified and connected to Telegram'
 				});
 				

@@ -1,12 +1,26 @@
 import { json } from '@sveltejs/kit';
 import { execSync } from 'child_process';
+import { dev } from '$app/environment';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ url }) => {
 	try {
 		const lines = url.searchParams.get('lines') || '50';
 		
-		// Get PM2 logs for the sqdgn-bot process
+		if (dev) {
+			// Development mode - return mock logs
+			const mockLogs = [
+				'[INFO] Development server started',
+				'[INFO] SvelteKit application running in dev mode',
+				'[INFO] Watching for file changes...',
+				'[INFO] System ready for development',
+				`[DEV] Generated at ${new Date().toLocaleTimeString()}`
+			];
+			
+			return json({ logs: mockLogs });
+		}
+		
+		// Production mode - Get PM2 logs for the sqdgn-bot process
 		const command = `pm2 logs sqdgn-bot --lines ${lines} --nostream --raw`;
 		const output = execSync(command, { 
 			encoding: 'utf-8',
@@ -27,6 +41,16 @@ export const GET: RequestHandler = async ({ url }) => {
 		return json({ logs });
 	} catch (error) {
 		console.error('Failed to fetch logs:', error);
+		
+		if (dev) {
+			// In development, return a simple error message
+			return json({ 
+				logs: [
+					'[DEV] Development mode - PM2 not available',
+					'[INFO] This is normal in development environment'
+				] 
+			});
+		}
 		
 		// Fallback: try to read from file system if PM2 command fails
 		try {

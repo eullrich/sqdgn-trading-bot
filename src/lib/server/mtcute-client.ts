@@ -1,4 +1,4 @@
-import { TelegramClient } from 'mtcute';
+import { TelegramClient } from '@mtcute/node';
 
 /**
  * Alternative Telegram client using mtcute library

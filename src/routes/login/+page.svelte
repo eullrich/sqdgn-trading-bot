@@ -6,8 +6,6 @@
 	let error = '';
 	
 	// Form data
-	let apiId = '';
-	let apiHash = '';
 	let phoneNumber = '';
 	let verificationCode = '';
 	let password = '';
@@ -19,8 +17,8 @@
 	let needsPassword = false;
 
 	async function submitCredentials() {
-		if (!apiId || !apiHash || !phoneNumber) {
-			error = 'Please fill in all required fields';
+		if (!phoneNumber) {
+			error = 'Please enter your phone number';
 			return;
 		}
 
@@ -32,8 +30,6 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					apiId: parseInt(apiId),
-					apiHash,
 					phoneNumber
 				})
 			});
@@ -106,9 +102,7 @@
 			console.log('Verification result:', result);
 
 			if (response.ok) {
-				sessionString = result.sessionString;
-				// Store session in cookie
-				document.cookie = `telegram_session=${sessionString}; path=/; max-age=${60*60*24*30}`;
+				// Session cookie is now set server-side by the verification endpoint
 				step = 'success';
 			} else {
 				error = result.error || 'Verification failed';
@@ -120,8 +114,9 @@
 		}
 	}
 
-	function proceedToChannels() {
-		goto('/channels');
+	function proceedToDashboard() {
+		// Navigate to dashboard and refresh to reload user state
+		goto('/', { replaceState: true });
 	}
 </script>
 
@@ -157,40 +152,6 @@
 			{#if step === 'credentials'}
 				<form on:submit|preventDefault={submitCredentials} class="space-y-6">
 					<div>
-						<label for="apiId" class="block text-sm font-medium text-gray-700">
-							API ID
-						</label>
-						<div class="mt-1">
-							<input
-								id="apiId"
-								name="apiId"
-								type="text"
-								required
-								bind:value={apiId}
-								class="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-								placeholder="Get from my.telegram.org"
-							/>
-						</div>
-					</div>
-
-					<div>
-						<label for="apiHash" class="block text-sm font-medium text-gray-700">
-							API Hash
-						</label>
-						<div class="mt-1">
-							<input
-								id="apiHash"
-								name="apiHash"
-								type="text"
-								required
-								bind:value={apiHash}
-								class="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-								placeholder="Get from my.telegram.org"
-							/>
-						</div>
-					</div>
-
-					<div>
 						<label for="phoneNumber" class="block text-sm font-medium text-gray-700">
 							Phone Number
 						</label>
@@ -203,8 +164,12 @@
 								bind:value={phoneNumber}
 								class="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
 								placeholder="+1234567890"
+								disabled={loading}
 							/>
 						</div>
+						<p class="mt-2 text-sm text-gray-600">
+							Enter your phone number with country code (e.g., +1 for US)
+						</p>
 					</div>
 
 					<div>
@@ -216,19 +181,13 @@
 							{#if loading}
 								<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
 							{/if}
-							Connect to Telegram
+							Send Verification Code
 						</button>
 					</div>
 
 					<div class="mt-6">
 						<div class="text-xs text-gray-600">
-							<p class="mb-2"><strong>How to get API credentials:</strong></p>
-							<ol class="list-decimal list-inside space-y-1">
-								<li>Go to <a href="https://my.telegram.org" target="_blank" class="text-blue-600 hover:text-blue-500">my.telegram.org</a></li>
-								<li>Sign in with your phone number</li>
-								<li>Go to "API development tools"</li>
-								<li>Create a new app and copy the API ID and Hash</li>
-							</ol>
+							<p>A verification code will be sent to your Telegram app once you submit your phone number.</p>
 						</div>
 					</div>
 				</form>
@@ -304,13 +263,13 @@
 					</div>
 					<h3 class="text-lg font-medium text-gray-900 mb-2">Successfully Connected!</h3>
 					<p class="text-sm text-gray-600 mb-6">
-						Your Telegram account is now connected. You can now select channels to monitor.
+						Your Telegram account is now connected. You can access the trading dashboard.
 					</p>
 					<button
-						on:click={proceedToChannels}
+						on:click={proceedToDashboard}
 						class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
 					>
-						Select Channels to Monitor
+						Go to Dashboard
 					</button>
 				</div>
 			{/if}

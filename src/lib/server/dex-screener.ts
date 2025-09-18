@@ -86,14 +86,14 @@ class DexScreenerAPI {
 					}
 
 					// Wait if we've hit rate limit
-					if (this.requestCount >= this.RATE_LIMIT) {
+					if (this.requestCount >= DexScreenerAPI.RATE_LIMIT) {
 						const waitTime = 60000 - (now - this.windowStart);
 						await new Promise(resolve => setTimeout(resolve, waitTime));
 						return makeRequest(); // Retry after waiting
 					}
 
 					this.requestCount++;
-					console.log(`📊 Making DEX Screener API request (${this.requestCount}/${this.RATE_LIMIT}): ${url}`);
+					console.log(`📊 Making DEX Screener API request (${this.requestCount}/${DexScreenerAPI.RATE_LIMIT}): ${url}`);
 					
 					const response = await fetch(url, {
 						headers: {
@@ -112,7 +112,7 @@ class DexScreenerAPI {
 			};
 
 			// Add to queue if we're at limit, otherwise execute immediately
-			if (this.requestCount >= this.RATE_LIMIT) {
+			if (this.requestCount >= DexScreenerAPI.RATE_LIMIT) {
 				this.requestQueue.push(makeRequest);
 				this.processQueue();
 			} else {
@@ -131,7 +131,7 @@ class DexScreenerAPI {
 			this.windowStart = now;
 			
 			// Process queued requests
-			while (this.requestQueue.length > 0 && this.requestCount < this.RATE_LIMIT) {
+			while (this.requestQueue.length > 0 && this.requestCount < DexScreenerAPI.RATE_LIMIT) {
 				const request = this.requestQueue.shift();
 				if (request) {
 					request().catch(console.error);

@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import pkg from 'telegram';
 import { StringSession } from 'telegram/sessions';
+import { TELEGRAM_API_ID, TELEGRAM_API_HASH } from '$env/static/private';
 
 const { TelegramClient } = pkg;
 
@@ -17,13 +18,24 @@ if (!global.activeSessions) {
 
 export const POST: RequestHandler = async ({ request }) => {
 	try {
-		const { apiId, apiHash, phoneNumber } = await request.json();
+		const { phoneNumber } = await request.json();
 
-		if (!apiId || !apiHash || !phoneNumber) {
+		if (!phoneNumber) {
 			return json({
 				success: false,
-				error: 'API ID, API Hash, and phone number are required'
+				error: 'Phone number is required'
 			}, { status: 400 });
+		}
+
+		// Use environment variables for API credentials
+		const apiId = parseInt(TELEGRAM_API_ID || '0');
+		const apiHash = TELEGRAM_API_HASH || '';
+
+		if (!apiId || !apiHash) {
+			return json({
+				success: false,
+				error: 'Telegram API credentials not configured on server'
+			}, { status: 500 });
 		}
 
 		// Create a new session

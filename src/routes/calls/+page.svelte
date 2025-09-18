@@ -1,7 +1,10 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import type { Call } from '$lib/types';
 	import { formatMultiplier } from '$lib/utils';
+	// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+	// import { supabase, realtimeStatus } from '$lib/stores/supabase';
+	// import type { RealtimeChannel } from '@supabase/supabase-js';
 
 	let calls: Call[] = [];
 	let loading = true;
@@ -9,18 +12,33 @@
 	let currentPage = 0;
 	let pageSize = 20;
 	let hasMore = true;
+	let lastPriceRefresh: string | null = null;
 
 	// Filters
 	let filterToken = '';
 	let filterCallType = '';
 	let filterLabel = '';
 
-	// Sorting
-	let sortField = 'created_at';
+	// Sorting - default to most recent calls first (descending order)
+	let sortField = 'messageTimestamp';
 	let sortDirection: 'asc' | 'desc' = 'desc';
+
+	// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+	// Real-time subscription
+	// let realtimeChannel: RealtimeChannel | null = null;
+	// let isRealtimeConnected = false;
 
 	onMount(() => {
 		loadCalls();
+		// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+		// setupRealtimeSubscription();
+	});
+
+	onDestroy(() => {
+		// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+		// if (realtimeChannel) {
+		// 	realtimeChannel.unsubscribe();
+		// }
 	});
 
 	async function loadCalls(reset = false) {
@@ -85,6 +103,11 @@
 				calls = [...calls, ...(data.calls || [])];
 			}
 			
+			// Update last price refresh time
+			if (data.lastPriceRefresh) {
+				lastPriceRefresh = data.lastPriceRefresh;
+			}
+			
 			hasMore = (data.calls || []).length === pageSize;
 			currentPage++;
 		} catch (err) {
@@ -99,6 +122,69 @@
 	function handleFilterChange() {
 		loadCalls(true);
 	}
+
+	// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+	function setupRealtimeSubscription() {
+		console.log('⚠️ Real-time subscriptions temporarily disabled during database migration');
+		// console.log('🔄 Setting up real-time subscription for calls table...');
+		//
+		// realtimeChannel = supabase
+		// 	.channel('calls-changes')
+		// 	.on(
+		// 		'postgres_changes',
+		// 		{
+		// 			event: '*', // Listen to all events (INSERT, UPDATE, DELETE)
+		// 			schema: 'public',
+		// 			table: 'calls'
+		// 		},
+		// 		(payload) => {
+		// 			console.log('📡 Real-time update received:', payload);
+		// 			handleRealtimeUpdate(payload);
+		// 		}
+		// 	)
+		// 	.subscribe((status) => {
+		// 		console.log('Real-time subscription status:', status);
+		// 		isRealtimeConnected = status === 'SUBSCRIBED';
+		// 		if (status === 'SUBSCRIBED') {
+		// 			realtimeStatus.set('connected');
+		// 			console.log('✅ Real-time subscription connected');
+		// 		} else if (status === 'CHANNEL_ERROR') {
+		// 			realtimeStatus.set('error');
+		// 			console.error('❌ Real-time subscription error');
+		// 		}
+		// 	});
+	}
+
+	// TEMPORARILY DISABLED DURING DATABASE MIGRATION
+	// function handleRealtimeUpdate(payload: any) {
+	//   const { eventType, new: newRecord, old: oldRecord } = payload;
+	//
+	//   if (eventType === 'INSERT' && newRecord) {
+	//     // Add new call to the beginning of the list (most recent first)
+	//     const newCall = newRecord as Call;
+	//     console.log('📬 New call received via real-time:', newCall.token_symbol);
+	//
+	//     // Only add if it's not already in the list (avoid duplicates)
+	//     const existingIndex = calls.findIndex(call => call.id === newCall.id);
+	//     if (existingIndex === -1) {
+	//       calls = [newCall, ...calls];
+	//       console.log('✅ Added new call to UI:', newCall.token_symbol);
+	//     }
+	//   } else if (eventType === 'UPDATE' && newRecord) {
+	//     // Update existing call
+	//     const updatedCall = newRecord as Call;
+	//     const index = calls.findIndex(call => call.id === updatedCall.id);
+	//     if (index !== -1) {
+	//       calls[index] = updatedCall;
+	//       console.log('🔄 Updated call in UI:', updatedCall.token_symbol);
+	//     }
+	//   } else if (eventType === 'DELETE' && oldRecord) {
+	//     // Remove deleted call
+	//     const deletedCall = oldRecord as Call;
+	//     calls = calls.filter(call => call.id !== deletedCall.id);
+	//     console.log('🗑️ Removed call from UI:', deletedCall.token_symbol);
+	//   }
+	// }
 
 	function getRiskLevelColor(riskLevel: string): string {
 		switch (riskLevel) {
@@ -145,14 +231,21 @@
 		return formatDate(dateString);
 	}
 
-	function formatMarketCap(value: number): string {
-		if (!value || value === 0) return '-';
-		if (value >= 1000000) {
-			return `$${(value / 1000000).toFixed(2)}M`;
-		} else if (value >= 1000) {
-			return `$${(value / 1000).toFixed(0)}K`;
+	function formatMarketCap(value: number | string | null | undefined): string {
+		// Handle edge cases and convert to number if needed
+		if (value === null || value === undefined || value === '' || value === 0) return '-';
+
+		const numValue = typeof value === 'string' ? parseFloat(value) : value;
+
+		// Check if we have a valid number after conversion
+		if (isNaN(numValue) || !isFinite(numValue)) return '-';
+
+		if (numValue >= 1000000) {
+			return `$${(numValue / 1000000).toFixed(2)}M`;
+		} else if (numValue >= 1000) {
+			return `$${(numValue / 1000).toFixed(0)}K`;
 		}
-		return `$${value.toFixed(0)}`;
+		return `$${numValue.toFixed(0)}`;
 	}
 
 	function formatCallType(callType: string): string {
@@ -175,15 +268,36 @@
 
 	function formatPriceChange(change: number | null): { text: string; colorClass: string } {
 		if (change === null || change === 0) {
-			return { text: '-', colorClass: 'text-gray-500' };
+			return { text: '-', colorClass: 'text-gray-400' };
 		}
 		
 		const absChange = Math.abs(change);
 		const sign = change > 0 ? '+' : '';
 		const text = `${sign}${absChange.toFixed(2)}%`;
-		const colorClass = change > 0 ? 'text-green-600' : 'text-red-600';
+		const colorClass = change > 0 ? 'text-green-400' : 'text-red-400';
 		
 		return { text, colorClass };
+	}
+
+	function formatValueComparison(entryValue: number | null, currentValue: number | null, deltaPercent: number | null) {
+		const entryText = entryValue ? formatMarketCap(entryValue) : '-';
+		const currentText = currentValue ? formatMarketCap(currentValue) : '-';
+		
+		let deltaText = '-';
+		let deltaColorClass = 'text-gray-400';
+		
+		if (deltaPercent !== null && deltaPercent !== 0) {
+			const sign = deltaPercent > 0 ? '+' : '';
+			deltaText = `${sign}${deltaPercent.toFixed(2)}%`;
+			deltaColorClass = deltaPercent > 0 ? 'text-green-400' : 'text-red-400';
+		}
+		
+		return {
+			entryText,
+			currentText,
+			deltaText,
+			deltaColorClass
+		};
 	}
 
 	function getTimeSince(dateString: string | null): string {
@@ -198,33 +312,6 @@
 		return `${Math.floor(diffMins / 1440)}d ago`;
 	}
 
-	let priceUpdateInProgress = false;
-
-	async function updatePrices(force = false) {
-		if (priceUpdateInProgress) return;
-		
-		try {
-			priceUpdateInProgress = true;
-			const params = force ? '?force=true' : '';
-			const response = await fetch(`/api/prices/fetch${params}`, {
-				method: 'POST'
-			});
-			
-			if (response.ok) {
-				const result = await response.json();
-				console.log(`Price update completed: ${result.updated}/${result.processed} updated`);
-				// Refresh the calls data to show updated prices
-				await loadCalls(true);
-			} else {
-				const error = await response.json();
-				console.error('Price update failed:', error);
-			}
-		} catch (error) {
-			console.error('Error updating prices:', error);
-		} finally {
-			priceUpdateInProgress = false;
-		}
-	}
 
 	function handleSort(field: string) {
 		if (sortField === field) {
@@ -233,7 +320,7 @@
 		} else {
 			// New field, default to desc for most fields, asc for text fields
 			sortField = field;
-			sortDirection = field === 'token_symbol' ? 'asc' : 'desc';
+			sortDirection = field === 'tokenSymbol' ? 'asc' : 'desc';
 		}
 		loadCalls(true);
 	}
@@ -249,26 +336,26 @@
 </svelte:head>
 
 <div class="space-y-6">
+
 	<div class="flex justify-between items-center">
 		<div>
-			<h2 class="text-2xl font-bold text-gray-900">Trading Calls</h2>
-			<p class="text-gray-600">All parsed trading signals from the SQDGN channel</p>
+			<div class="flex items-center space-x-3">
+				<h2 class="text-2xl font-bold" style="color: var(--sqdgn-text);">Trading Calls</h2>
+				<div class="flex items-center space-x-1.5">
+					<div
+						class="w-2 h-2 rounded-full bg-gray-400"
+					></div>
+					<span class="text-xs" style="color: var(--sqdgn-text-muted);">
+						Real-time Disabled
+					</span>
+				</div>
+			</div>
+			<p style="color: var(--sqdgn-text-muted);">All parsed trading signals from the SQDGN channel</p>
 		</div>
-		<div class="flex gap-2">
-			<button
-				on:click={() => updatePrices(false)}
-				disabled={priceUpdateInProgress}
-				class="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-blue-500"
-			>
-				{priceUpdateInProgress ? 'Updating...' : 'Update Prices'}
-			</button>
-			<button
-				on:click={() => updatePrices(true)}
-				disabled={priceUpdateInProgress}
-				class="px-4 py-2 text-sm font-medium text-blue-600 bg-white border border-blue-600 rounded-md hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-blue-500"
-			>
-				Force Refresh
-			</button>
+		<div class="flex flex-col items-end gap-2">
+			<div class="text-xs" style="color: var(--sqdgn-text-muted);">
+				Last price refresh: {lastPriceRefresh ? getTimeSince(lastPriceRefresh) : 'Loading...'}
+			</div>
 			<button
 				on:click={() => {
 					filterToken = '';
@@ -276,7 +363,13 @@
 					filterLabel = '';
 					handleFilterChange();
 				}}
-				class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+				class="px-4 py-2 text-sm font-medium rounded-md focus:outline-none transition-colors"
+				style="color: var(--sqdgn-text); background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border);"
+				onmouseover="this.style.backgroundColor='var(--sqdgn-border)'"
+				onmouseout="this.style.backgroundColor='var(--sqdgn-surface)'"
+				onkeydown="/* handle enter key */"
+				role="button"
+				tabindex="0"
 			>
 				Clear Filters
 			</button>
@@ -285,33 +378,33 @@
 
 
 	<!-- Calls Table -->
-	<div class="bg-white rounded-lg shadow-sm border overflow-hidden">
+	<div class="rounded-lg shadow-sm overflow-hidden" style="background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border);">
 		{#if loading && calls.length === 0}
 			<div class="flex justify-center items-center h-64">
-				<div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+				<div class="animate-spin rounded-full h-8 w-8 border-b-2" style="border-color: var(--sqdgn-accent);"></div>
 			</div>
 		{:else if error}
-			<div class="bg-red-50 border border-red-200 rounded-md p-4 m-6">
-				<p class="text-red-800">Error: {error}</p>
+			<div class="rounded-md p-4 m-6" style="background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);">
+				<p class="text-red-400">Error: {error}</p>
 			</div>
 		{:else if calls.length === 0}
 			<div class="text-center py-12">
-				<p class="text-gray-500">No calls found matching your criteria</p>
+				<p style="color: var(--sqdgn-text-muted);">No calls found matching your criteria</p>
 			</div>
 		{:else}
-			<div class="overflow-x-auto">
-				<table class="min-w-full divide-y divide-gray-200">
-					<thead class="bg-gray-50">
+			<div class="w-full">
+				<table class="w-full table-fixed" style="border-collapse: separate; border-spacing: 0;">
+					<thead style="background-color: var(--sqdgn-border);">
 						<tr>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider w-20" style="color: var(--sqdgn-text-muted);">
 								<div class="space-y-0.5">
 									<div>
 										<button 
-											on:click={() => handleSort('token_symbol')} 
-											class="flex items-center space-x-1 hover:text-gray-700 focus:outline-none"
+											on:click={() => handleSort('tokenSymbol')} 
+											class="flex items-center space-x-1 hover:text-gray-700 focus:outline-none text-xs"
 										>
 											<span>Token</span>
-											<span>{getSortIcon('token_symbol')}</span>
+											<span class="text-xs">{getSortIcon('tokenSymbol')}</span>
 										</button>
 									</div>
 									<input
@@ -319,139 +412,135 @@
 										placeholder="Filter..."
 										bind:value={filterToken}
 										on:input={handleFilterChange}
-										class="w-full px-1.5 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+										class="w-full px-1 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
 									>
 								</div>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider w-24" style="color: var(--sqdgn-text-muted);">
 								<div class="space-y-0.5">
-									<div>Call Type</div>
+									<div class="text-xs">Type</div>
 									<select
 										bind:value={filterCallType}
 										on:change={handleFilterChange}
-										class="w-full px-1.5 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+										class="w-full px-1 py-0.5 text-xs rounded focus:outline-none focus:ring-1"
+										style="background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border); color: var(--sqdgn-text);"
+										onmouseover="this.style.borderColor='var(--sqdgn-accent)'"
+										onmouseout="this.style.borderColor='var(--sqdgn-border)'"
 									>
 										<option value="">All</option>
-										<option value="market_activity">Market Activity</option>
-										<option value="transaction_spotted">Transaction Spotted</option>
+										<option value="market_activity">Market</option>
+										<option value="transaction_spotted">Transaction</option>
 										<option value="large_trade">Large Trade</option>
-										<option value="wallet_activity">Wallet Activity</option>
-										<option value="significant_transaction">Significant Transaction</option>
-										<option value="wallet_signal">Wallet Signal</option>
+										<option value="wallet_activity">Wallet</option>
+										<option value="significant_transaction">Significant</option>
+										<option value="wallet_signal">Signal</option>
 										<option value="smart_money">Smart Money</option>
-										<option value="onchain_signal">On-chain Signal</option>
+										<option value="onchain_signal">On-chain</option>
 									</select>
 								</div>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider w-20" style="color: var(--sqdgn-text-muted);">
 								<div class="space-y-0.5">
-									<div>Label</div>
+									<div class="text-xs">Label</div>
 									<select
 										bind:value={filterLabel}
 										on:change={handleFilterChange}
-										class="w-full px-1.5 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+										class="w-full px-1 py-0.5 text-xs rounded focus:outline-none focus:ring-1"
+										style="background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border); color: var(--sqdgn-text);"
+										onmouseover="this.style.borderColor='var(--sqdgn-accent)'"
+										onmouseout="this.style.borderColor='var(--sqdgn-border)'"
 									>
 										<option value="">All</option>
-										<option value="NEWBORN">Newborn</option>
-										<option value="ESTABLISHED">Established</option>
-										<option value="VETERAN">Veteran</option>
-										<option value="MATURING">Maturing</option>
+										<option value="NEWBORN">New</option>
+										<option value="ESTABLISHED">Est.</option>
+										<option value="VETERAN">Vet.</option>
+										<option value="MATURING">Mat.</option>
 									</select>
 								</div>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								<button 
-									on:click={() => handleSort('created_at')} 
-									class="flex items-center space-x-1 hover:text-gray-700 focus:outline-none"
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider w-28" style="color: var(--sqdgn-text-muted);">
+								<div class="text-xs">Channel</div>
+							</th>
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider w-24" style="color: var(--sqdgn-text-muted);">
+								<button
+									on:click={() => handleSort('messageTimestamp')}
+									class="flex items-center space-x-1 hover:text-gray-700 focus:outline-none text-xs"
 								>
-									<span>Call Time</span>
-									<span>{getSortIcon('created_at')}</span>
+									<span>Time</span>
+									<span class="text-xs">{getSortIcon('messageTimestamp')}</span>
 								</button>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								Creation Date
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider flex-1" style="color: var(--sqdgn-text-muted);">
+								<div class="text-xs">Price (MC)</div>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								Market Cap
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider flex-1" style="color: var(--sqdgn-text-muted);">
+								<div class="text-xs">Liquidity</div>
 							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								Liquidity
-							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								Current Market Cap
-							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								<button 
-									on:click={() => handleSort('pnl_percentage')} 
-									class="flex items-center space-x-1 hover:text-gray-700 focus:outline-none"
-								>
-									<span>Market Cap Performance</span>
-									<span>{getSortIcon('pnl_percentage')}</span>
-								</button>
-							</th>
-							<th class="px-3 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-								DEX Screener
+							<th class="px-2 py-1 text-left text-xs font-medium uppercase tracking-wider flex-1" style="color: var(--sqdgn-text-muted);">
+								<div class="text-xs">Volume</div>
 							</th>
 						</tr>
 					</thead>
-					<tbody class="bg-white divide-y divide-gray-200">
+					<tbody style="background-color: var(--sqdgn-surface);">
 						{#each calls as call}
-							<tr class="hover:bg-gray-50">
-								<td class="px-3 py-2 whitespace-nowrap">
-									<span class="font-medium text-gray-900">
-										{call.token_symbol ? `$${call.token_symbol}` : '-'}
-									</span>
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									{formatCallType(call.call_type)}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									{call.sqdgn_label || '-'}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									<div class="font-medium">{getTimeAgo(call.message_timestamp || call.created_at)}</div>
-									<div class="text-xs text-gray-500">{formatDateTime(call.message_timestamp || call.created_at)}</div>
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500">
-									{call.creation_date ? formatDate(call.creation_date) : '-'}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									{call.market_cap ? formatMarketCap(call.market_cap) : '-'}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									{call.liquidity ? formatMarketCap(call.liquidity) : '-'}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
-									<div class="font-medium">{call.latest_market_cap ? formatMarketCap(call.latest_market_cap) : '-'}</div>
-									{#if call.market_cap_last_updated}
-										<div class="text-xs text-gray-500">{getTimeSince(call.market_cap_last_updated)}</div>
-									{:else}
-										<div class="text-xs text-gray-400">No market cap data</div>
-									{/if}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm">
-									{#if call.market_cap_change !== null}
-										{@const marketCapChange = formatPriceChange(call.market_cap_change)}
-										<div class="flex flex-col">
-											<span class={marketCapChange.colorClass + ' font-medium'}>
-												{marketCapChange.text}
-											</span>
-											<div class="text-xs text-gray-500 mt-1">
-												{call.market_cap ? formatMarketCap(call.market_cap) : 'N/A'} → {call.latest_market_cap ? formatMarketCap(call.latest_market_cap) : 'N/A'}
-											</div>
-										</div>
-									{:else}
-										<span class="text-gray-400">-</span>
-									{/if}
-								</td>
-								<td class="px-3 py-2 whitespace-nowrap text-sm text-blue-600">
-									{#if call.dex_screener_url}
-										<a href={call.dex_screener_url} target="_blank" rel="noopener noreferrer" class="hover:underline">
-											View
+							{@const priceComparison = formatValueComparison(call.marketCap, call.currentMarketCap, call.market_cap_change)}
+							{@const liquidityComparison = formatValueComparison(call.liquidity, call.current_liquidity, call.liquidity_change)}
+							{@const volumeComparison = formatValueComparison(call.volume24h, call.current_volume, call.volume_change)}
+							<tr class="transition-colors" style="border-bottom: 1px solid var(--sqdgn-border);" onmouseover="this.style.backgroundColor='rgba(77, 101, 255, 0.1)'" onmouseout="this.style.backgroundColor='transparent'">
+								<td class="px-2 py-2 truncate">
+									{#if call.dexScreenerUrl}
+										<a href={call.dexScreenerUrl} target="_blank" rel="noopener noreferrer"
+											class="text-sm font-medium hover:underline transition-colors"
+											style="color: var(--sqdgn-accent);">
+											{call.tokenSymbol ? `$${call.tokenSymbol}` : '-'}
 										</a>
 									{:else}
-										<span class="text-gray-400">-</span>
+										<span class="text-sm font-medium truncate" style="color: var(--sqdgn-text);">
+											{call.tokenSymbol ? `$${call.tokenSymbol}` : '-'}
+										</span>
 									{/if}
+								</td>
+								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={formatCallType(call.callType)}>
+									{formatCallType(call.callType)}
+								</td>
+								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={call.sqdgnLabel || '-'}>
+									{call.sqdgnLabel || '-'}
+								</td>
+								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={call.channel || 'SQDGN'}>
+									{call.channel ? call.channel.replace('_Solana_Direct', '').replace('_', ' ') : 'SQDGN'}
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									<div class="font-medium">{getTimeAgo(call.messageTimestamp || call.createdAt)}</div>
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									<div class="space-y-1">
+										<div style="color: var(--sqdgn-text-muted);">
+											{priceComparison.entryText} | {priceComparison.currentText}
+										</div>
+										<div class="font-medium {priceComparison.deltaColorClass}">
+											{priceComparison.deltaText}
+										</div>
+									</div>
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									<div class="space-y-1">
+										<div style="color: var(--sqdgn-text-muted);">
+											{liquidityComparison.entryText} | {liquidityComparison.currentText}
+										</div>
+										<div class="font-medium {liquidityComparison.deltaColorClass}">
+											{liquidityComparison.deltaText}
+										</div>
+									</div>
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									<div class="space-y-1">
+										<div style="color: var(--sqdgn-text-muted);">
+											{volumeComparison.entryText} | {volumeComparison.currentText}
+										</div>
+										<div class="font-medium {volumeComparison.deltaColorClass}">
+											{volumeComparison.deltaText}
+										</div>
+									</div>
 								</td>
 							</tr>
 						{/each}
@@ -460,11 +549,14 @@
 			</div>
 
 			{#if hasMore}
-				<div class="px-6 py-4 border-t border-gray-200 text-center">
+				<div class="px-6 py-4 text-center" style="border-top: 1px solid var(--sqdgn-border);">
 					<button
 						on:click={() => loadCalls()}
 						disabled={loading}
-						class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+						class="px-4 py-2 text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+						style="background-color: var(--sqdgn-accent);"
+						onmouseover="if (!this.disabled) this.style.backgroundColor='var(--sqdgn-hover)'"
+						onmouseout="if (!this.disabled) this.style.backgroundColor='var(--sqdgn-accent)'"
 					>
 						{loading ? 'Loading...' : 'Load More'}
 					</button>
