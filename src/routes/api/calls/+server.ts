@@ -14,6 +14,10 @@ export const GET: RequestHandler = async ({ url }) => {
 		const sortField = url.searchParams.get('sort_field') || 'messageTimestamp';
 		const sortDirection = url.searchParams.get('sort_direction') || 'desc';
 
+		console.log('📞 Calls API called with params:', {
+			limit, offset, tokenSymbol, callType, label, isValid, sortField, sortDirection
+		});
+
 		// Use repository to get calls with filters
 		const filters = {
 			...(tokenSymbol && { tokenSymbol: tokenSymbol.toUpperCase() }),
@@ -22,11 +26,19 @@ export const GET: RequestHandler = async ({ url }) => {
 			...(isValid !== null && { isValid: isValid === 'true' })
 		};
 
+		console.log('📞 Filters applied:', filters);
+
 		const data = await callsRepo.findManyWithFilters({
 			filters,
 			orderBy: { [sortField]: sortDirection === 'asc' ? 'asc' : 'desc' },
 			skip: offset,
 			take: limit
+		});
+
+		console.log('📞 Raw data returned from DB:', {
+			dataExists: !!data,
+			count: data?.length || 0,
+			sampleIds: data?.slice(0, 3).map(d => d.id) || []
 		});
 
 		if (!data) {

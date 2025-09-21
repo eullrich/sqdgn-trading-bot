@@ -1,14 +1,20 @@
 import { Connection } from '@solana/web3.js';
 import { JupiterClient } from '$lib/server/jupiter-client';
+import { getCurrentNetworkConfig } from '$lib/constants';
 import type { OrderRequest, OrderResult } from '$lib/types/trading.types';
 
 export class OrderExecutor {
 	private jupiterClient: JupiterClient;
 	private connection: Connection;
 
-	constructor(rpcUrl: string = 'https://api.mainnet-beta.solana.com') {
-		this.jupiterClient = new JupiterClient(rpcUrl);
-		this.connection = new Connection(rpcUrl, 'confirmed');
+	constructor(rpcUrl?: string) {
+		const networkConfig = getCurrentNetworkConfig();
+		const effectiveRpcUrl = rpcUrl || networkConfig.rpcUrl;
+
+		console.log(`🌐 OrderExecutor using network: ${networkConfig.name} (${effectiveRpcUrl})`);
+
+		this.jupiterClient = new JupiterClient(effectiveRpcUrl);
+		this.connection = new Connection(effectiveRpcUrl, 'confirmed');
 	}
 
 	async execute(request: OrderRequest): Promise<OrderResult> {

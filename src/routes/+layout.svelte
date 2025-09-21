@@ -1,13 +1,17 @@
 <script lang="ts">
 	import favicon from '$lib/assets/favicon.svg';
 	import ModernHeader from '$lib/components/ModernHeader.svelte';
+	import { getCurrentNetworkConfig, SOLANA_NETWORKS, CURRENT_NETWORK } from '$lib/constants';
 	import type { LayoutData } from './$types';
-	
+
 	export let data: LayoutData;
 	export let params: Record<string, string>;
-	
+
 	// Suppress unused variable warnings - these are SvelteKit layout props
 	data, params;
+
+	const networkConfig = getCurrentNetworkConfig();
+	const isTestnet = CURRENT_NETWORK !== SOLANA_NETWORKS.MAINNET;
 </script>
 
 <svelte:head>
@@ -30,10 +34,15 @@
 	<nav style="background-color: var(--sqdgn-surface); border-bottom: 1px solid var(--sqdgn-border);" class="shadow-lg">
 		<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
 			<div class="flex justify-between items-center h-16">
-				<div class="flex items-center">
+				<div class="flex items-center space-x-3">
 					<h1 class="text-xl font-semibold" style="color: var(--sqdgn-text);">
 						SQDGN Trading Bot
 					</h1>
+					{#if isTestnet}
+						<span class="px-2 py-1 text-xs font-bold rounded-full bg-orange-600 text-white border border-orange-500">
+							{networkConfig.displayName}
+						</span>
+					{/if}
 				</div>
 				<div class="flex items-center space-x-6">
 					<a href="/calls" class="px-3 py-2 rounded-md text-sm font-medium transition-colors hover:bg-opacity-10" 

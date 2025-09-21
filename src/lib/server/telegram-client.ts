@@ -569,23 +569,27 @@ class TelegramClient {
             clearInterval(this.heartbeatInterval);
         }
 
-        // AGGRESSIVE keep-alive every 15 seconds to prevent idle disconnects
+        // Conservative keep-alive every 60 seconds to prevent excessive API calls
         this.heartbeatInterval = setInterval(async () => {
             try {
                 if (this.client && this.isConnected) {
-                    // IGNORE client.disconnected flag - it's unreliable in GramJS
-                    // Use keep-alive success/failure as the true health indicator
-                    
-                    // Send aggressive keep-alive every cycle (15s) to prevent idle timeouts
-                    console.log('💓 Sending aggressive keep-alive to maintain connection health');
+                    // Use conservative keep-alive to reduce timeout errors
+                    // Only send keep-alive if no recent successful operation
+                    const timeSinceLastSuccess = Date.now() - this.lastSuccessfulOperation;
+                    if (timeSinceLastSuccess < 45000) { // Skip if activity within 45 seconds
+                        console.log('💓 Skipping keep-alive (recent activity detected)');
+                        return;
+                    }
+
+                    console.log('💓 Sending conservative keep-alive to maintain connection health');
                     
                     try {
-                        // Use lightweight getState call with short timeout
+                        // Use lightweight getState call with conservative timeout
                         const startTime = Date.now();
                         await Promise.race([
                             this.client.invoke(new (await import('telegram')).Api.updates.GetState()),
-                            new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('Keep-alive timeout')), 8000)
+                            new Promise((_, reject) =>
+                                setTimeout(() => reject(new Error('Keep-alive timeout')), 15000)
                             )
                         ]);
                         
@@ -601,13 +605,13 @@ class TelegramClient {
                     } catch (keepAliveError) {
                         console.error('💔 Keep-alive failed - connection may be stale:', keepAliveError);
                         
-                        // Only trigger reconnection after 2 consecutive failures
+                        // Only trigger reconnection after 3 consecutive failures to be more conservative
                         this.consecutiveStreamFailures++;
-                        if (this.consecutiveStreamFailures >= 2) {
+                        if (this.consecutiveStreamFailures >= 3) {
                             console.warn('🔄 Multiple keep-alive failures, triggering reconnection');
                             this.handleReconnectAsync();
                         } else {
-                            console.log('⚠️ Keep-alive failed, will retry in 15 seconds');
+                            console.log('⚠️ Keep-alive failed, will retry in 60 seconds');
                         }
                     }
                 }
@@ -617,7 +621,7 @@ class TelegramClient {
                     this.handleReconnectAsync();
                 }
             }
-        }, 15000); // AGGRESSIVE 15-second keep-alives
+        }, 60000); // Conservative 60-second keep-alives to reduce timeout errors
     }
 
     private async performControlledReconnect(): Promise<void> {

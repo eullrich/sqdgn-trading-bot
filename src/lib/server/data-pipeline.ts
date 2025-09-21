@@ -169,7 +169,6 @@ export class DataPipeline {
 			messageId: messageId,
 			rawMessage: text,
 			messageTimestamp: metadata?.timestamp ? new Date(metadata.timestamp) : null,
-			channel: metadata?.channelName || 'SQDGN_Solana_Direct', // Default to SQDGN if not provided
 			tokenSymbol: parseResult.tokenSymbol,
 			tokenName: parseResult.metadata?.tokenName,
 			contractAddress: parseResult.contractAddress,

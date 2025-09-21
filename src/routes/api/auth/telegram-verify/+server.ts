@@ -41,82 +41,55 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 		// authentication attempt with the verification code provided by the user
 		
 		if (sessionData.needsVerification && verificationCode) {
-			console.log('📱 User provided verification code, restarting authentication');
-			
-			const { client, apiId, apiHash, phoneNumber } = sessionData;
-			
-			try {
-				// Restart the authentication process with the verification code
-				await client.start({
-					phoneNumber: async () => {
-						console.log('📞 Phone number requested during verification');
-						return phoneNumber;
-					},
-					phoneCode: async () => {
-						console.log('📱 Providing verification code:', verificationCode);
-						return verificationCode;
-					},
-					password: async () => {
-						console.log('🔐 2FA password requested during verification');
-						// Update session to indicate 2FA is needed
-						sessionData.needsPassword = true;
-						sessionData.needsVerification = false;
-						global.activeSessions.set(sessionId, sessionData);
-						throw new Error('2FA_REQUIRED');
-					},
-					onError: (err) => {
-						console.error('Verification auth error:', err);
-						throw err;
-					}
-				});
-				
-				// Success - authentication completed
-				const sessionString = client.session.save();
-				console.log('✅ Verification successful, cleaning up');
+			console.log('📱 User provided verification code, resolving Promise');
 
-				// Set the session cookie server-side
-				cookies.set('telegram_session', sessionString, {
-					path: '/',
-					httpOnly: true,
-					secure: process.env.NODE_ENV === 'production',
-					sameSite: 'strict',
-					maxAge: 60 * 60 * 24 * 30 // 30 days
-				});
+			// Resolve the Promise that's waiting in the phoneCode callback
+			if (sessionData.verificationPromiseResolve) {
+				sessionData.verificationCode = verificationCode;
+				sessionData.verificationPromiseResolve(verificationCode);
 
-				// Clean up
-				await client.disconnect();
-				global.activeSessions?.delete(sessionId);
+				// Wait a moment for the authentication to complete
+				return new Promise((resolve) => {
+					setTimeout(() => {
+						// Check if authentication completed
+						if (sessionData.authCompleted) {
+							console.log('✅ Authentication completed via Promise resolution');
+							const sessionString = sessionData.client.session.save();
 
-				return json({
-					success: true,
-					message: 'Successfully verified and connected to Telegram'
+							// Set the session cookie server-side
+							cookies.set('telegram_session', sessionString, {
+								path: '/',
+								httpOnly: true,
+								secure: process.env.NODE_ENV === 'production',
+								sameSite: 'strict',
+								maxAge: 60 * 60 * 24 * 30 // 30 days
+							});
+
+							// Clean up
+							sessionData.client.disconnect();
+							global.activeSessions?.delete(sessionId);
+
+							resolve(json({
+								success: true,
+								message: 'Successfully verified and connected to Telegram'
+							}));
+						} else {
+							console.log('⚠️ Authentication not completed yet');
+							resolve(json({
+								success: false,
+								error: 'Authentication in progress, please wait'
+							}, { status: 202 }));
+						}
+					}, 2000); // Wait 2 seconds for auth to complete
 				});
-				
-			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-				console.error('Verification error:', errorMessage);
-				
-				if (errorMessage === '2FA_REQUIRED') {
-					return json({
-						success: false,
-						needsPassword: true,
-						error: 'Please enter your 2FA password'
-					}, { status: 400 });
-				}
-				
-				// Handle specific verification errors
-				let userError = 'Verification failed';
-				if (errorMessage.includes('PHONE_CODE_INVALID')) {
-					userError = 'Invalid verification code';
-				} else if (errorMessage.includes('PHONE_CODE_EXPIRED')) {
-					userError = 'Verification code expired';
-				}
-				
+			} else {
+				console.log('⚠️ No Promise resolver found');
 				return json({
 					success: false,
-					error: userError
+					error: 'No authentication session waiting for verification'
 				}, { status: 400 });
 			}
+
 		}
 		
 		if (sessionData.needsPassword && password) {

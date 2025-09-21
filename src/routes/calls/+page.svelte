@@ -2,17 +2,21 @@
 	import { onMount, onDestroy } from 'svelte';
 	import type { Call } from '$lib/types';
 	import { formatMultiplier } from '$lib/utils';
+	import type { PageData } from './$types';
 	// TEMPORARILY DISABLED DURING DATABASE MIGRATION
 	// import { supabase, realtimeStatus } from '$lib/stores/supabase';
 	// import type { RealtimeChannel } from '@supabase/supabase-js';
 
-	let calls: Call[] = [];
-	let loading = true;
-	let error: string | null = null;
+	export let data: PageData;
+
+	// Initialize with server-side data
+	let calls: Call[] = data.calls || [];
+	let loading = false; // Data is already loaded server-side
+	let error: string | null = data.error || null;
 	let currentPage = 0;
 	let pageSize = 20;
 	let hasMore = true;
-	let lastPriceRefresh: string | null = null;
+	let lastPriceRefresh: string | null = data.lastPriceRefresh || null;
 
 	// Filters
 	let filterToken = '';
@@ -29,7 +33,12 @@
 	// let isRealtimeConnected = false;
 
 	onMount(() => {
-		loadCalls();
+		// Data is already loaded server-side, no need to call loadCalls
+		console.log('📞 Client-side onMount - data already loaded:', {
+			callsLength: calls.length,
+			hasError: !!error,
+			lastRefresh: lastPriceRefresh
+		});
 		// TEMPORARILY DISABLED DURING DATABASE MIGRATION
 		// setupRealtimeSubscription();
 	});
@@ -65,6 +74,7 @@
 			params.set('sort_direction', sortDirection);
 
 			console.log('Loading calls with params:', params.toString());
+			console.log('About to make fetch request to:', `/api/calls?${params}`);
 
 			const response = await fetch(`/api/calls?${params}`, {
 				headers: {
@@ -91,10 +101,16 @@
 				throw new Error('Server returned invalid JSON response');
 			});
 			
-			console.log('Loaded calls data:', { 
-				callCount: data.calls?.length || 0, 
+			console.log('Loaded calls data:', {
+				callCount: data.calls?.length || 0,
 				hasMore: (data.calls || []).length === pageSize,
-				pagination: data.pagination 
+				pagination: data.pagination,
+				sampleCall: data.calls?.[0] ? {
+					id: data.calls[0].id,
+					tokenSymbol: data.calls[0].tokenSymbol,
+					hasMarketCapChange: typeof data.calls[0].market_cap_change !== 'undefined',
+					hasCurrentLiquidity: typeof data.calls[0].current_liquidity !== 'undefined'
+				} : null
 			});
 			
 			if (reset) {
@@ -114,8 +130,19 @@
 			console.error('Load calls error:', err);
 			const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred while loading calls';
 			error = `Error loading calls: ${errorMessage}`;
+			console.error('Full error details:', {
+				message: errorMessage,
+				stack: err instanceof Error ? err.stack : 'No stack trace',
+				name: err instanceof Error ? err.name : 'Unknown error type',
+				err
+			});
 		} finally {
 			loading = false;
+			console.log('loadCalls completed. Final state:', {
+				callsLength: calls.length,
+				loading,
+				hasError: !!error
+			});
 		}
 	}
 
@@ -339,17 +366,7 @@
 
 	<div class="flex justify-between items-center">
 		<div>
-			<div class="flex items-center space-x-3">
-				<h2 class="text-2xl font-bold" style="color: var(--sqdgn-text);">Trading Calls</h2>
-				<div class="flex items-center space-x-1.5">
-					<div
-						class="w-2 h-2 rounded-full bg-gray-400"
-					></div>
-					<span class="text-xs" style="color: var(--sqdgn-text-muted);">
-						Real-time Disabled
-					</span>
-				</div>
-			</div>
+			<h2 class="text-2xl font-bold" style="color: var(--sqdgn-text);">Trading Calls</h2>
 			<p style="color: var(--sqdgn-text-muted);">All parsed trading signals from the SQDGN channel</p>
 		</div>
 		<div class="flex flex-col items-end gap-2">
@@ -379,6 +396,14 @@
 
 	<!-- Calls Table -->
 	<div class="rounded-lg shadow-sm overflow-hidden" style="background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border);">
+		<!-- Debug info -->
+		<div class="px-4 py-2 bg-gray-100 text-xs text-gray-700 border-b">
+			Debug: calls.length = {calls.length}, loading = {loading}, error = {error || 'null'}
+			<button on:click={() => loadCalls(true)} class="ml-4 px-2 py-1 bg-blue-500 text-white text-xs rounded">
+				Manual Reload
+			</button>
+		</div>
+
 		{#if loading && calls.length === 0}
 			<div class="flex justify-center items-center h-64">
 				<div class="animate-spin rounded-full h-8 w-8 border-b-2" style="border-color: var(--sqdgn-accent);"></div>
@@ -483,64 +508,33 @@
 					</thead>
 					<tbody style="background-color: var(--sqdgn-surface);">
 						{#each calls as call}
-							{@const priceComparison = formatValueComparison(call.marketCap, call.currentMarketCap, call.market_cap_change)}
-							{@const liquidityComparison = formatValueComparison(call.liquidity, call.current_liquidity, call.liquidity_change)}
-							{@const volumeComparison = formatValueComparison(call.volume24h, call.current_volume, call.volume_change)}
-							<tr class="transition-colors" style="border-bottom: 1px solid var(--sqdgn-border);" onmouseover="this.style.backgroundColor='rgba(77, 101, 255, 0.1)'" onmouseout="this.style.backgroundColor='transparent'">
+							<!-- Simplified rendering for debugging -->
+							<tr class="transition-colors" style="border-bottom: 1px solid var(--sqdgn-border);">
 								<td class="px-2 py-2 truncate">
-									{#if call.dexScreenerUrl}
-										<a href={call.dexScreenerUrl} target="_blank" rel="noopener noreferrer"
-											class="text-sm font-medium hover:underline transition-colors"
-											style="color: var(--sqdgn-accent);">
-											{call.tokenSymbol ? `$${call.tokenSymbol}` : '-'}
-										</a>
-									{:else}
-										<span class="text-sm font-medium truncate" style="color: var(--sqdgn-text);">
-											{call.tokenSymbol ? `$${call.tokenSymbol}` : '-'}
-										</span>
-									{/if}
-								</td>
-								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={formatCallType(call.callType)}>
-									{formatCallType(call.callType)}
-								</td>
-								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={call.sqdgnLabel || '-'}>
-									{call.sqdgnLabel || '-'}
-								</td>
-								<td class="px-2 py-2 text-xs truncate" style="color: var(--sqdgn-text);" title={call.channel || 'SQDGN'}>
-									{call.channel ? call.channel.replace('_Solana_Direct', '').replace('_', ' ') : 'SQDGN'}
+									<span class="text-sm font-medium" style="color: var(--sqdgn-text);">
+										{call.tokenSymbol || 'Unknown'}
+									</span>
 								</td>
 								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
-									<div class="font-medium">{getTimeAgo(call.messageTimestamp || call.createdAt)}</div>
+									{call.callType || 'N/A'}
 								</td>
 								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
-									<div class="space-y-1">
-										<div style="color: var(--sqdgn-text-muted);">
-											{priceComparison.entryText} | {priceComparison.currentText}
-										</div>
-										<div class="font-medium {priceComparison.deltaColorClass}">
-											{priceComparison.deltaText}
-										</div>
-									</div>
+									{call.sqdgnLabel || 'N/A'}
 								</td>
 								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
-									<div class="space-y-1">
-										<div style="color: var(--sqdgn-text-muted);">
-											{liquidityComparison.entryText} | {liquidityComparison.currentText}
-										</div>
-										<div class="font-medium {liquidityComparison.deltaColorClass}">
-											{liquidityComparison.deltaText}
-										</div>
-									</div>
+									SQDGN
 								</td>
 								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
-									<div class="space-y-1">
-										<div style="color: var(--sqdgn-text-muted);">
-											{volumeComparison.entryText} | {volumeComparison.currentText}
-										</div>
-										<div class="font-medium {volumeComparison.deltaColorClass}">
-											{volumeComparison.deltaText}
-										</div>
-									</div>
+									{getTimeAgo(call.messageTimestamp || call.createdAt)}
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									{formatMarketCap(call.marketCap)}
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									{formatMarketCap(call.liquidity)}
+								</td>
+								<td class="px-2 py-2 text-xs" style="color: var(--sqdgn-text);">
+									{formatMarketCap(call.volume24h)}
 								</td>
 							</tr>
 						{/each}

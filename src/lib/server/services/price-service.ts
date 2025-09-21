@@ -183,34 +183,44 @@ export class PriceService {
     return results;
   }
 
-  async ingestPriceSnapshots(): Promise<{ inserted: number; errors: number; tokens: number }> {
+  async ingestPriceSnapshots(): Promise<{ inserted: number; errors: number; tokens: number; duration: number; skipped: number }> {
+    const startTime = Date.now();
     try {
-      // Get all unique token addresses from recent calls
-      const calls = await callsRepo.findMany({
-        where: {
-          contractAddress: { not: null },
-          createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
-        },
-        select: {
-          contractAddress: true,
-          tokenSymbol: true
-        }
-      });
+      // Optimized: Get unique token addresses directly from recent calls
+      const uniqueAddresses = await this.getUniqueRecentTokens();
 
-      if (!calls || calls.length === 0) {
+      if (uniqueAddresses.length === 0) {
         console.log('No tokens to fetch prices for');
-        return { inserted: 0, errors: 0, tokens: 0 };
+        return { inserted: 0, errors: 0, tokens: 0, duration: Date.now() - startTime, skipped: 0 };
       }
-
-      // Get unique addresses
-      const uniqueAddresses = [...new Set(calls.map(c => c.contractAddress).filter(Boolean))] as string[];
       console.log(`Found ${uniqueAddresses.length} unique tokens to fetch`);
 
-      // Fetch prices
-      const priceMap = await this.fetchMultipleTokenPrices(uniqueAddresses);
+      // Skip tokens with recent price data to reduce API calls
+      const tokensToFetch = await this.filterTokensForUpdate(uniqueAddresses);
+      const skipped = uniqueAddresses.length - tokensToFetch.length;
+
+      if (skipped > 0) {
+        console.log(`Skipping ${skipped} tokens with recent price data`);
+      }
+
+      // Fetch prices for remaining tokens
+      const priceMap = tokensToFetch.length > 0
+        ? await this.fetchMultipleTokenPrices(tokensToFetch)
+        : new Map<string, PriceSnapshot>();
+
+      // Add cached prices for skipped tokens
+      for (const address of uniqueAddresses) {
+        if (!priceMap.has(address)) {
+          const cached = this.getFromCache(address);
+          if (cached) {
+            priceMap.set(address, cached);
+          }
+        }
+      }
       
-      // Prepare snapshots for insertion
+      // Prepare snapshots for insertion and batch call updates
       const snapshots = [];
+      const callUpdates = new Map<string, any>();
       const now = new Date().toISOString();
       
       for (const [address, snapshot] of priceMap.entries()) {
@@ -234,29 +244,20 @@ export class PriceService {
           source: 'price_service'
         });
 
-        // Also update the calls table with latest price
-        try {
-          await callsRepo.findMany({
-            where: { contractAddress: address }
-          }).then(async (callsToUpdate) => {
-            await Promise.all(callsToUpdate.map(call =>
-              callsRepo.update(call.id, {
-                currentPriceUsd: snapshot.priceUsd,
-                currentMarketCap: snapshot.marketCap,
-                priceUpdatedAt: new Date(now),
-                marketCapUpdatedAt: new Date(now)
-              })
-            ));
-          });
-        } catch (updateError) {
-          console.warn(`Failed to update calls table for ${address}:`, updateError);
-        }
+        // Track for batch call updates
+        callUpdates.set(address, {
+          currentPriceUsd: snapshot.priceUsd,
+          currentMarketCap: snapshot.marketCap,
+          priceUpdatedAt: new Date(now),
+          marketCapUpdatedAt: new Date(now)
+        });
       }
 
-      // Batch insert snapshots
+      // Batch insert snapshots and update calls
+      let insertedCount = 0;
       if (snapshots.length > 0) {
         try {
-          await priceRepo.batchInsertSnapshots(snapshots.map(snapshot => ({
+          const result = await priceRepo.batchInsertSnapshots(snapshots.map(snapshot => ({
             tokenAddress: snapshot.token_address,
             tokenSymbol: snapshot.token_symbol,
             time: new Date(snapshot.time),
@@ -276,27 +277,124 @@ export class PriceService {
             pairAddress: snapshot.pair_address,
             source: snapshot.source
           })));
+          insertedCount = result.count || snapshots.length;
         } catch (insertError) {
           console.error('Failed to insert snapshots:', insertError);
           return {
             inserted: 0,
             errors: 1,
-            tokens: uniqueAddresses.length 
+            tokens: uniqueAddresses.length,
+            duration: Date.now() - startTime,
+            skipped: 0
           };
         }
       }
 
-      console.log(`✅ Inserted ${snapshots.length} price snapshots for ${uniqueAddresses.length} tokens`);
-      
+      // Batch update calls table
+      if (callUpdates.size > 0) {
+        try {
+          await this.batchUpdateCalls(callUpdates);
+        } catch (updateError) {
+          console.warn('Failed to batch update calls:', updateError);
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      console.log(`✅ Inserted ${insertedCount} price snapshots for ${uniqueAddresses.length} tokens in ${duration}ms (skipped ${skipped})`);
+
       return {
-        inserted: snapshots.length,
+        inserted: insertedCount,
         errors: uniqueAddresses.length - priceMap.size,
-        tokens: uniqueAddresses.length
+        tokens: uniqueAddresses.length,
+        duration,
+        skipped
       };
 
     } catch (error) {
+      const duration = Date.now() - startTime;
       console.error('Price ingestion failed:', error);
-      return { inserted: 0, errors: 1, tokens: 0 };
+      return { inserted: 0, errors: 1, tokens: 0, duration, skipped: 0 };
+    }
+  }
+
+  /**
+   * Optimized method to get unique token addresses from recent calls
+   */
+  private async getUniqueRecentTokens(): Promise<string[]> {
+    try {
+      // Use a more efficient query to get unique contract addresses
+      const result = await callsRepo.findUniqueRecentContracts(
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      );
+
+      return result.filter(Boolean) as string[];
+    } catch (error) {
+      console.warn('Failed to get unique recent tokens, falling back to full query:', error);
+
+      // Fallback to original method
+      const calls = await callsRepo.findMany({
+        where: {
+          contractAddress: { not: null },
+          createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+        },
+        select: {
+          contractAddress: true
+        }
+      });
+
+      return [...new Set(calls.map(c => c.contractAddress).filter(Boolean))] as string[];
+    }
+  }
+
+  /**
+   * Filter tokens that need price updates (skip recent data)
+   */
+  private async filterTokensForUpdate(addresses: string[]): Promise<string[]> {
+    const tokensToFetch: string[] = [];
+    const minUpdateInterval = 4 * 60 * 1000; // 4 minutes
+
+    for (const address of addresses) {
+      // Check cache first
+      const cached = this.getFromCache(address);
+      if (cached) {
+        continue; // Skip if in cache
+      }
+
+      // Check database for recent price data
+      try {
+        const latest = await priceRepo.getLatestPrice(address);
+        if (!latest || (Date.now() - new Date(latest.time).getTime()) > minUpdateInterval) {
+          tokensToFetch.push(address);
+        }
+      } catch (error) {
+        // If we can't check, fetch it
+        tokensToFetch.push(address);
+      }
+    }
+
+    return tokensToFetch;
+  }
+
+  /**
+   * Batch update calls table with new price data
+   */
+  private async batchUpdateCalls(updates: Map<string, any>): Promise<void> {
+    const batchSize = 50;
+    const addresses = Array.from(updates.keys());
+
+    for (let i = 0; i < addresses.length; i += batchSize) {
+      const batch = addresses.slice(i, i + batchSize);
+
+      try {
+        await Promise.all(batch.map(async (address) => {
+          const update = updates.get(address);
+          if (update) {
+            await callsRepo.batchUpdateByContract(address, update);
+          }
+        }));
+      } catch (error) {
+        console.warn(`Failed to batch update calls for addresses ${batch.join(', ')}:`, error);
+      }
     }
   }
 

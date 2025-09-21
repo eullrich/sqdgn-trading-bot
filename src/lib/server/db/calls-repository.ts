@@ -346,4 +346,58 @@ export class CallsRepository {
 			},
 		});
 	}
+
+	/**
+	 * Get unique contract addresses from recent calls (optimized for price ingestion)
+	 */
+	async findUniqueRecentContracts(since: Date): Promise<string[]> {
+		try {
+			// Use a direct query to get unique contract addresses efficiently
+			const result = await db.call.groupBy({
+				by: ['contractAddress'],
+				where: {
+					createdAt: { gte: since },
+					contractAddress: { not: null },
+				},
+			});
+
+			return result.map(item => item.contractAddress).filter(Boolean) as string[];
+		} catch (error) {
+			console.warn('Failed to use groupBy, falling back to findMany:', error);
+
+			// Fallback to findMany if groupBy fails
+			const calls = await db.call.findMany({
+				where: {
+					createdAt: { gte: since },
+					contractAddress: { not: null },
+				},
+				select: {
+					contractAddress: true,
+				},
+				distinct: ['contractAddress'],
+			});
+
+			return calls.map(c => c.contractAddress).filter(Boolean) as string[];
+		}
+	}
+
+	/**
+	 * Batch update calls by contract address (optimized for price ingestion)
+	 */
+	async batchUpdateByContract(contractAddress: string, updateData: {
+		currentPriceUsd?: number;
+		currentMarketCap?: number;
+		priceUpdatedAt?: Date;
+		marketCapUpdatedAt?: Date;
+	}): Promise<void> {
+		try {
+			await db.call.updateMany({
+				where: { contractAddress },
+				data: updateData,
+			});
+		} catch (error) {
+			console.warn(`Failed to batch update calls for contract ${contractAddress}:`, error);
+			throw error;
+		}
+	}
 }

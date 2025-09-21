@@ -6,7 +6,7 @@ import type {
 	ITradingService,
 	TradingMetrics
 } from '$lib/types/trading.types';
-import { TESTING_WALLET_ADDRESS } from '$lib/constants';
+import { TESTING_WALLET_ADDRESS, getCurrentNetworkConfig, CURRENT_NETWORK, SOLANA_NETWORKS, TESTNET_CONFIG } from '$lib/constants';
 import { OrderExecutor } from './OrderExecutor';
 import { PositionManager } from './PositionManager';
 import { TrailingStopManager } from './TrailingStopManager';
@@ -19,8 +19,13 @@ export class TradingService implements ITradingService {
 	private autoBuyProcessor: AutoBuyProcessor;
 	private isRunning: boolean = false;
 	private processingInterval: NodeJS.Timeout | null = null;
+	private networkConfig: ReturnType<typeof getCurrentNetworkConfig>;
 
-	constructor(rpcUrl: string = 'https://api.mainnet-beta.solana.com') {
+	constructor(rpcUrl?: string) {
+		this.networkConfig = getCurrentNetworkConfig();
+
+		console.log(`🌐 TradingService initialized for ${this.networkConfig.name} network`);
+
 		this.orderExecutor = new OrderExecutor(rpcUrl);
 		this.positionManager = new PositionManager();
 		this.trailingStopManager = new TrailingStopManager();
@@ -82,9 +87,32 @@ export class TradingService implements ITradingService {
 	}
 
 	async processSignal(signal: TradingSignal): Promise<void> {
-		console.log(`Processing signal for token ${signal.tokenSymbol}`);
+		console.log(`🔄 Processing signal for token ${signal.tokenSymbol} on ${this.networkConfig.name}`);
 
-		// Get all users with auto-buy enabled
+		// On testnet, automatically create test positions for easier testing
+		if (CURRENT_NETWORK === SOLANA_NETWORKS.DEVNET) {
+			console.log(`🧪 Testnet mode: Creating test position for ${signal.tokenSymbol}`);
+
+			// Create a test position with the testing wallet using testnet config
+			await TradingService.createTestPosition(signal, TESTNET_CONFIG.defaultBuyAmount);
+
+			// Also add to auto-buy queue for the testing wallet if needed
+			const testWalletAddress = process.env.TEST_WALLET_ADDRESS || TESTING_WALLET_ADDRESS;
+
+			await tradingRepo.queueAutoBuy({
+				callId: null,
+				userWalletAddress: testWalletAddress,
+				tokenAddress: signal.tokenAddress,
+				tokenSymbol: signal.tokenSymbol,
+				buyAmountSol: TESTNET_CONFIG.defaultBuyAmount,
+				maxPrice: null,
+				slippageBps: TESTNET_CONFIG.testSlippageBps
+			});
+
+			console.log(`✅ Test order queued for ${signal.tokenSymbol} with testnet wallet (${TESTNET_CONFIG.defaultBuyAmount} SOL)`);
+		}
+
+		// Get all users with auto-buy enabled (for mainnet and additional users)
 		const configs = await tradingRepo.findAutoBuyUsers();
 
 		if (!configs) {

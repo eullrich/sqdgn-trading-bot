@@ -117,21 +117,6 @@ export class TrailingStopSimulator {
     };
 
     // Apply filters
-    if (filters.callTypes?.length) {
-      whereConditions.callType = { in: filters.callTypes };
-    }
-
-    if (filters.labels?.length) {
-      if (filters.labels.includes('NO_LABEL')) {
-        const otherLabels = filters.labels.filter(l => l !== 'NO_LABEL');
-        whereConditions.OR = [
-          { sqdgnLabel: { in: otherLabels } },
-          { sqdgnLabel: null }
-        ];
-      } else {
-        whereConditions.sqdgnLabel = { in: filters.labels };
-      }
-    }
 
     if (filters.marketCapMin) {
       whereConditions.marketCap = { ...whereConditions.marketCap, gte: filters.marketCapMin };

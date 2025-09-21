@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { supabase } from '$lib/stores/supabase';
+	import { TESTING_WALLET_ADDRESS, getCurrentNetworkConfig, SOLANA_NETWORKS, CURRENT_NETWORK } from '$lib/constants';
 	import type { RealtimeChannel } from '@supabase/supabase-js';
 	
 	let walletAddress = '';
@@ -32,13 +33,23 @@
 	// Real-time functionality
 	let realtimeChannel: RealtimeChannel | null = null;
 	let isRealtimeConnected = false;
+
+	// Network configuration
+	const networkConfig = getCurrentNetworkConfig();
+	const isTestnet = CURRENT_NETWORK !== SOLANA_NETWORKS.MAINNET;
+	let manualWalletAddress = '';
+	let showManualInput = false;
 	
 	onMount(async () => {
 		// Check if wallet is connected
 		if (browser && window.solana && window.solana.isConnected) {
 			walletAddress = window.solana.publicKey.toString();
 			await loadConfig();
+		} else if (isTestnet) {
+			// On testnet, automatically load testing wallet positions
+			walletAddress = TESTING_WALLET_ADDRESS;
 		}
+
 		// Load engine status
 		await loadEngineStatus();
 		// Load recent positions if wallet connected
@@ -114,13 +125,13 @@
 	
 	async function connectWallet() {
 		if (!browser) return;
-		
+
 		try {
 			if (!window.solana) {
 				window.open('https://phantom.app/', '_blank');
 				return;
 			}
-			
+
 			const response = await window.solana.connect();
 			walletAddress = response.publicKey.toString();
 			await loadConfig();
@@ -128,6 +139,29 @@
 			error = 'Failed to connect wallet';
 			console.error(err);
 		}
+	}
+
+	async function useManualWallet() {
+		if (!manualWalletAddress.trim()) {
+			error = 'Please enter a valid wallet address';
+			return;
+		}
+
+		walletAddress = manualWalletAddress.trim();
+		showManualInput = false;
+		error = '';
+
+		await loadConfig();
+		await loadRecentPositions();
+		setupRealtimeSubscription();
+	}
+
+	function useTestingWallet() {
+		walletAddress = TESTING_WALLET_ADDRESS;
+		error = '';
+		loadConfig();
+		loadRecentPositions();
+		setupRealtimeSubscription();
 	}
 	
 	async function loadEngineStatus() {
@@ -282,26 +316,106 @@
 			<svg class="w-16 h-16 mx-auto mb-4" style="color: var(--sqdgn-text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"></path>
 			</svg>
-			<h2 class="text-xl font-semibold mb-2" style="color: var(--sqdgn-text);">Connect Your Wallet</h2>
+			<h2 class="text-xl font-semibold mb-2" style="color: var(--sqdgn-text);">
+				{#if isTestnet}
+					Testnet Wallet Options
+				{:else}
+					Connect Your Wallet
+				{/if}
+			</h2>
 			<p class="mb-6" style="color: var(--sqdgn-text-muted);">
-				Connect your Phantom wallet to configure trading settings
+				{#if isTestnet}
+					Choose a wallet option for testing on {networkConfig.displayName}
+				{:else}
+					Connect your Phantom wallet to configure trading settings
+				{/if}
 			</p>
-			<button
-				on:click={connectWallet}
-				class="px-6 py-3 rounded-xl font-medium transition-all duration-200"
-				style="background-color: var(--sqdgn-accent); color: white;"
-				onmouseover="this.style.backgroundColor='var(--sqdgn-hover)'"
-				onmouseout="this.style.backgroundColor='var(--sqdgn-accent)'"
-			>
-				Connect Phantom Wallet
-			</button>
+
+			{#if isTestnet}
+				<div class="space-y-4">
+					<button
+						on:click={useTestingWallet}
+						class="w-full px-6 py-3 rounded-xl font-medium transition-all duration-200"
+						style="background-color: var(--sqdgn-accent); color: white;"
+						onmouseover="this.style.backgroundColor='var(--sqdgn-hover)'"
+						onmouseout="this.style.backgroundColor='var(--sqdgn-accent)'"
+					>
+						Use Default Testing Wallet
+					</button>
+
+					{#if !showManualInput}
+						<button
+							on:click={() => showManualInput = true}
+							class="w-full px-6 py-3 rounded-xl font-medium transition-all duration-200 border"
+							style="background-color: transparent; color: var(--sqdgn-text); border-color: var(--sqdgn-border);"
+							onmouseover="this.style.backgroundColor='var(--sqdgn-surface)'"
+							onmouseout="this.style.backgroundColor='transparent'"
+						>
+							Enter Custom Wallet Address
+						</button>
+					{:else}
+						<div class="space-y-3">
+							<input
+								bind:value={manualWalletAddress}
+								placeholder="Enter testnet wallet address..."
+								class="w-full px-4 py-3 rounded-xl font-mono text-sm"
+								style="background-color: var(--sqdgn-bg); color: var(--sqdgn-text); border: 1px solid var(--sqdgn-border);"
+							/>
+							<div class="flex space-x-3">
+								<button
+									on:click={useManualWallet}
+									class="flex-1 px-4 py-2 rounded-xl font-medium transition-all duration-200"
+									style="background-color: var(--sqdgn-accent); color: white;"
+								>
+									Use This Wallet
+								</button>
+								<button
+									on:click={() => { showManualInput = false; manualWalletAddress = ''; }}
+									class="flex-1 px-4 py-2 rounded-xl font-medium transition-all duration-200 border"
+									style="background-color: transparent; color: var(--sqdgn-text); border-color: var(--sqdgn-border);"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
+				</div>
+			{:else}
+				<button
+					on:click={connectWallet}
+					class="px-6 py-3 rounded-xl font-medium transition-all duration-200"
+					style="background-color: var(--sqdgn-accent); color: white;"
+					onmouseover="this.style.backgroundColor='var(--sqdgn-hover)'"
+					onmouseout="this.style.backgroundColor='var(--sqdgn-accent)'"
+				>
+					Connect Phantom Wallet
+				</button>
+			{/if}
 		</div>
 	{:else}
 		<div class="rounded-xl p-6 mb-6" style="background-color: var(--sqdgn-surface); border: 1px solid var(--sqdgn-border);">
-			<h2 class="text-lg font-semibold mb-4" style="color: var(--sqdgn-text);">Wallet Connected</h2>
+			<div class="flex items-center justify-between mb-4">
+				<h2 class="text-lg font-semibold" style="color: var(--sqdgn-text);">
+					{#if isTestnet}
+						Testnet Wallet
+					{:else}
+						Wallet Connected
+					{/if}
+				</h2>
+				{#if isTestnet}
+					<span class="px-2 py-1 text-xs font-bold rounded-full bg-orange-600 text-white">
+						{networkConfig.displayName}
+					</span>
+				{/if}
+			</div>
 			<p class="text-sm font-mono" style="color: var(--sqdgn-text-muted);">
 				{walletAddress.slice(0, 8)}...{walletAddress.slice(-8)}
 			</p>
+			{#if isTestnet && walletAddress === TESTING_WALLET_ADDRESS}
+				<p class="text-xs mt-2" style="color: var(--sqdgn-text-muted);">
+					Using default testing wallet for safe transactions
+				</p>
+			{/if}
 		</div>
 
 		<!-- Trading Engine Status -->

@@ -50,6 +50,11 @@ export const POST: RequestHandler = async ({ request }) => {
 		// Generate a session ID for tracking
 		const sessionId = Math.random().toString(36).substring(2, 15);
 
+		// Use flags to track what callbacks were triggered - declare at function scope
+		let codeRequested = false;
+		let passwordRequested = false;
+		let authCompleted = false;
+
 		// Store the session before starting the authentication process
 		global.activeSessions.set(sessionId, {
 			client,
@@ -72,11 +77,6 @@ export const POST: RequestHandler = async ({ request }) => {
 			console.log('⚡ Connecting to Telegram...');
 			await client.connect();
 			console.log('✅ Connected to Telegram successfully');
-
-			// Use flags to track what callbacks were triggered
-			let codeRequested = false;
-			let passwordRequested = false;
-			let authCompleted = false;
 			
 			// Start the login process with a timeout
 			const loginPromise = client.start({
@@ -113,24 +113,25 @@ export const POST: RequestHandler = async ({ request }) => {
 				phoneCode: async () => {
 					console.log('📱 Verification code callback triggered - Telegram requesting code');
 					codeRequested = true;
-					
+
 					// Update session flags
 					if (global.activeSessions.has(sessionId)) {
 						const sessionData = global.activeSessions.get(sessionId)!;
 						sessionData.needsVerification = true;
-						
+
 						// If we already have a verification code, return it
 						if (sessionData.verificationCode) {
 							console.log('📱 Using stored verification code');
 							return sessionData.verificationCode;
 						}
-						
-						// First, let Telegram send the code by throwing an error that we catch
-						// This ensures the verification code gets sent to the user's device
-						console.log('📱 Throwing error to trigger code sending, then will wait for user input');
-						throw new Error('VERIFICATION_CODE_NEEDED');
+
+						// Return a Promise that will be resolved when the user submits the code
+						console.log('📱 Waiting for verification code from user via API...');
+						return new Promise((resolve) => {
+							sessionData.verificationPromiseResolve = resolve;
+						});
 					}
-					
+
 					console.log('⚠️ Session not found during phoneCode callback');
 					throw new Error('Session expired');
 				},

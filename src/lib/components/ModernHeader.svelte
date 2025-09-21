@@ -4,9 +4,9 @@
 	import { goto } from '$app/navigation';
 	import WalletConnection from './WalletConnection.svelte';
 
-	// User state
+	// User state - start with false for better SSR/hydration
 	let user: any = null;
-	let userLoading = true;
+	let userLoading = false;
 	let userError: string | null = null;
 	
 	// Monitoring state
@@ -42,42 +42,61 @@
 	let selectedChannels: Set<string> = new Set();
 
 	onMount(async () => {
-		// Load user info with silent failure
-		await loadUserInfo();
+		// Only execute in browser context
+		if (!browser) return;
 
-		// Only check monitoring status if user is loaded and we're in browser
-		if (user && browser) {
-			// Use a delay to prevent initial loading flash
-			setTimeout(() => {
-				checkMonitoringStatus();
-			}, 500);
+		// Set loading state only when actually loading
+		userLoading = true;
+
+		// Add failsafe timeout to prevent infinite loading
+		const timeout = setTimeout(() => {
+			userLoading = false;
+		}, 10000); // 10 second timeout
+
+		try {
+			// Load user info with silent failure
+			await loadUserInfo();
+			clearTimeout(timeout);
+
+			// Only check monitoring status if user is loaded
+			if (user) {
+				// Use a delay to prevent initial loading flash
+				setTimeout(() => {
+					checkMonitoringStatus();
+				}, 500);
+			}
+		} catch (error) {
+			clearTimeout(timeout);
+			console.debug('ModernHeader onMount error:', error);
+			userLoading = false;
 		}
 	});
 
 	async function loadUserInfo() {
 		try {
-			userLoading = true;
 			userError = null;
 
 			const response = await fetch('/api/telegram/user-info');
 
-			if (!response.ok) {
-				// Silent failure - user likely not logged in
-				userError = null; // Don't show error state
-				return;
-			}
-
-			const result = await response.json();
-
-			if (result.success) {
-				user = result.user;
+			// Handle different response scenarios
+			if (response.ok) {
+				const result = await response.json();
+				if (result.success) {
+					user = result.user;
+				} else {
+					// API returned success:false (no session found)
+					user = null;
+					userError = null;
+				}
 			} else {
-				// Silent failure - user not logged in
+				// HTTP error (401, 500, etc.) - likely no session
+				user = null;
 				userError = null;
 			}
 		} catch (err) {
-			// Silent failure - don't show error states that cause flashing
+			// Network or parsing error - don't show error states that cause flashing
 			console.debug('User info not available (expected if not logged in):', err);
+			user = null;
 			userError = null;
 		} finally {
 			userLoading = false;

@@ -213,12 +213,47 @@ export class JobProcessor {
 
   private async executePriceIngestion(): Promise<void> {
     const priceService = getPriceService();
-    const result = await priceService.ingestPriceSnapshots();
-    
-    console.log(`Price ingestion: ${result.inserted} snapshots, ${result.errors} errors`);
-    
-    if (result.errors > result.inserted) {
-      throw new Error('Too many errors during price ingestion');
+    const startTime = Date.now();
+
+    try {
+      const result = await priceService.ingestPriceSnapshots();
+
+      console.log(`💰 Price ingestion completed: ${result.inserted} snapshots, ${result.errors} errors, ${result.skipped} skipped (${result.duration}ms)`);
+
+      // Log to audit for monitoring
+      await logAuditEvent(
+        EVENT_TYPES.PRICE_UPDATE,
+        'PRICE_INGESTION',
+        'batch',
+        {
+          inserted: result.inserted,
+          errors: result.errors,
+          tokens: result.tokens,
+          skipped: result.skipped,
+          duration: result.duration
+        }
+      );
+
+      // Only fail if significant errors occurred
+      if (result.errors > 0 && result.errors > result.inserted / 2) {
+        throw new Error(`Too many errors during price ingestion: ${result.errors}/${result.tokens}`);
+      }
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      console.error(`❌ Price ingestion failed after ${duration}ms:`, error);
+
+      // Log failure for monitoring
+      await logAuditEvent(
+        EVENT_TYPES.ERROR,
+        'PRICE_INGESTION',
+        'failed',
+        {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          duration
+        }
+      );
+
+      throw error;
     }
   }
 

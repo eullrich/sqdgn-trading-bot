@@ -93,7 +93,8 @@
 				takeProfitMultiplier: undefined,
 				maxHoldDays: undefined,
 				slippage: 20,
-				fees: 10
+				fees: 10,
+				investmentAmount: 1000
 			},
 			includeDetails: false
 		};
